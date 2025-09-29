@@ -1,0 +1,25 @@
+data_path:
+  # Google Driveのパス設定（編集不要）
+  win_base_path: "G:/"
+  mac_base_path: "./Library/CloudStorage/GoogleDrive-"
+
+  # 共有ドライブの言語設定（編集不要）
+  EN: "Shared drives"
+  JP: "共有ドライブ"
+  # ベースとなるPATHの構成要素
+  base_path_components:
+    - "MENTERU_50_開発"
+    - "54_開発プロジェクト群"
+    - "トラース・オン・プロダクト様"
+    - "20_開発環境"
+    - "AIrux8_opti_logic"
+
+  # データフォルダのパス設定
+  # 元データフォルダ（data/ の代替）
+  raw_data_path: "data/"
+
+  # 前処理済みデータフォルダ（data_processed/ の代替）
+  processed_data_path: "data_processed/"
+
+  # 前処理用フォルダ（既存）
+  original_input_path: "00_InputData/00_OriginalData_test/" # ✅

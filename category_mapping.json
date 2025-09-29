@@ -1,0 +1,18 @@
+{
+    "A/C ON/OFF": {
+        "0": 0,
+        "1": 1
+    },
+    "A/C Mode": {
+        "COOL": 1,
+        "FAN": 3,
+        "HEAT": 2
+    },
+    "A/C Fan Speed": {
+        "Auto": 0,
+        "High": 3,
+        "Low": 1,
+        "Medium": 2,
+        "Top": 4
+    }
+}
