@@ -560,9 +560,11 @@ class ModelTrainer:
             }
 
             # モデルディレクトリに保存
-            model_dir = f"models/{self.store_name}"
+            from config.utils import get_data_path
+
+            model_dir = os.path.join(get_data_path("models_path"), self.store_name)
             os.makedirs(model_dir, exist_ok=True)
-            model_path = f"{model_dir}/model_power_{category}.pkl"
+            model_path = os.path.join(model_dir, f"model_power_{category}.pkl")
             joblib.dump(model_info, model_path)
             print(f"💾 デフォルトPhase A予測モデル保存: {model_path}")
 
@@ -616,9 +618,11 @@ class ModelTrainer:
             }
 
             # モデルディレクトリに保存
-            model_dir = f"models/{self.store_name}"
+            from config.utils import get_data_path
+
+            model_dir = os.path.join(get_data_path("models_path"), self.store_name)
             os.makedirs(model_dir, exist_ok=True)
-            model_path = f"{model_dir}/model_env_{category}.pkl"
+            model_path = os.path.join(model_dir, f"model_env_{category}.pkl")
             joblib.dump(model_info, model_path)
             print(f"💾 デフォルト環境予測モデル保存: {model_path}")
 
@@ -908,18 +912,22 @@ class ModelTrainer:
 
     def save_models(self, env_models, power_models):
         """モデルの保存"""
-        model_dir = f"models/{self.store_name}"
+        from config.utils import get_data_path
+
+        model_dir = os.path.join(get_data_path("models_path"), self.store_name)
         os.makedirs(model_dir, exist_ok=True)
 
         if env_models:
             for category, model_info in env_models.items():
-                model_path = f"{model_dir}/model_environmental_{category}.pkl"
+                model_path = os.path.join(
+                    model_dir, f"model_environmental_{category}.pkl"
+                )
                 joblib.dump(model_info, model_path)
                 print(f"💾 環境予測モデル保存: {model_path}")
 
         if power_models:
             for category, model_info in power_models.items():
-                model_path = f"{model_dir}/model_power_{category}.pkl"
+                model_path = os.path.join(model_dir, f"model_power_{category}.pkl")
                 joblib.dump(model_info, model_path)
                 print(f"💾 Phase A予測モデル保存: {model_path}")
 
@@ -934,10 +942,14 @@ class Optimizer:
 
     def load_models(self):
         """モデルの読み込み"""
-        model_dir = f"models/{self.store_name}"
+        from config.utils import get_data_path
+
+        model_dir = os.path.join(get_data_path("models_path"), self.store_name)
 
         # 環境予測モデルの読み込み
-        env_model_files = glob.glob(f"{model_dir}/model_environmental_*.pkl")
+        env_model_files = glob.glob(
+            os.path.join(model_dir, "model_environmental_*.pkl")
+        )
         for file in env_model_files:
             category = (
                 os.path.basename(file)
@@ -947,7 +959,7 @@ class Optimizer:
             self.env_models[category] = joblib.load(file)
 
         # Phase A予測モデルの読み込み
-        power_model_files = glob.glob(f"{model_dir}/model_power_*.pkl")
+        power_model_files = glob.glob(os.path.join(model_dir, "model_power_*.pkl"))
         for file in power_model_files:
             category = (
                 os.path.basename(file).replace("model_power_", "").replace(".pkl", "")

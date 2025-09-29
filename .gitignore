@@ -212,3 +212,7 @@ credentials.json
 testsecret.json
 private_information.py
 .DS_Store
+
+# Model files
+*.pkl
+models/
