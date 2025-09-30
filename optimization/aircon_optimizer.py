@@ -54,9 +54,7 @@ class AirconOptimizer:
         from config.utils import get_data_path
 
         self.proc_dir = os.path.join(get_data_path("processed_data_path"), store_name)
-        self.plan_dir = os.path.join(
-            get_data_path("output_data_path", use_remote_paths=True), store_name
-        )
+        self.plan_dir = os.path.join(get_data_path("output_data_path"), store_name)
         os.makedirs(self.plan_dir, exist_ok=True)
 
     def _load_processed(self) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
