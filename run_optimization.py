@@ -2,7 +2,8 @@
 # エアコン最適化システム - 実行サンプル
 # =============================================================================
 
-from aircon_optimizer import AirconOptimizer
+from config.private_information import WEATHER_API_KEY
+from optimization.aircon_optimizer import AirconOptimizer
 
 
 def run_optimization_for_store(
@@ -19,20 +20,20 @@ def run_optimization_for_store(
     print(f"🚀 {store_name}の最適化パイプライン開始")
 
     # 最適化システムの初期化（前処理を実行）
-    enable_preprocessing = True
-    optimizer = AirconOptimizer(store_name, enable_preprocessing=enable_preprocessing)
+    enable_preprocessing = False
+    optimizer = AirconOptimizer(
+        store_name,
+        enable_preprocessing=enable_preprocessing,
+    )
 
     # フルパイプラインの実行
-    results = optimizer.run_full_pipeline(
-        std_multiplier_temp=std_multiplier_temp,
-        std_multiplier_power=std_multiplier_power,
-    )
+    results = optimizer.run(weather_api_key=WEATHER_API_KEY)
 
     if results:
         print(f"🎉 {store_name}の最適化が完了しました")
         print("📁 結果ファイル:")
-        print(f"   - planning/{store_name}/control_type_schedule.csv")
-        print(f"   - planning/{store_name}/unit_schedule.csv")
+        print(f"   - data/04_OutputData/{store_name}/control_type_schedule.csv")
+        print(f"   - data/04_OutputData/{store_name}/unit_schedule.csv")
         return True
     else:
         print(f"❌ {store_name}の最適化に失敗しました")

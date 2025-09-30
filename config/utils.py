@@ -10,8 +10,8 @@ import yaml
 from config import ACCESS_INFORMATION
 
 
-# 現在のディレクトリを変更し、元のディレクトリを保存する関数
 def ch_base_dir():
+    """現在のディレクトリを変更し、元のディレクトリを保存する関数"""
     global original_dir
     original_dir = os.getcwd()  # 現在のディレクトリを保存
     home_dir = os.path.expanduser("~")  # ホームディレクトリのパスを取得
@@ -19,20 +19,20 @@ def ch_base_dir():
     return os.getcwd()  # 新しいカレントディレクトリを返す
 
 
-# 元のディレクトリに戻る関数
 def reverse_dir():
+    """元のディレクトリに戻る関数"""
     os.chdir(original_dir)  # 保存していた元のディレクトリに戻る
 
 
-# 指定されたディレクトリに移動し、元のディレクトリを保存する関数
 def change_dir(temp_folder_path):
+    """指定されたディレクトリに移動し、元のディレクトリを保存する関数"""
     global original_dir
     original_dir = os.getcwd()  # 現在のディレクトリを保存
     os.chdir(temp_folder_path)  # 指定されたディレクトリに移動
 
 
-# DataFrameをCSVファイルとして保存する関数
 def upload_file(df: pd.DataFrame, name, temp_folder_path):
+    """DataFrameをCSVファイルとして保存する関数"""
     change_dir(temp_folder_path)  # 指定されたディレクトリに移動
     df.to_csv(f"{name}.csv", index=False, encoding="utf-8")  # CSVとして保存
     reverse_dir()  # 元のディレクトリに戻る
@@ -43,8 +43,12 @@ def join_paths(loader, node):
     return os.path.join(*seq)
 
 
-# 設定ファイルを読み込む関数
-def load_config():
+def load_config(use_remote_paths: bool = False):
+    """設定ファイルを読み込む関数
+
+    Args:
+        use_remote_paths (bool): True の場合 remote_paths を使用、False の場合 local_paths を使用
+    """
     root_path = os.path.dirname(os.path.dirname(__file__))  # ルートパスを取得
     config_path = "./config/config.yml"  # 設定ファイルのパス
     abs_path = Path(root_path, config_path).absolute()  # 絶対パスを生成
@@ -55,22 +59,28 @@ def load_config():
     with open(abs_path, "r", encoding="utf-8") as file:
         config = yaml.safe_load(file)  # YAMLファイルを読み込む
 
+    # パス設定の選択
+    if use_remote_paths:
+        path_config_key = "remote_paths"
+    else:
+        path_config_key = "local_paths"
+
     # プレースホルダーを実際の値で置換
-    config["data_path"] = {
+    config[path_config_key] = {
         k: v.format(ACCESS_INFORMATION=ACCESS_INFORMATION) if isinstance(v, str) else v
-        for k, v in config["data_path"].items()
+        for k, v in config[path_config_key].items()
     }
 
     # 環境変数を展開
-    for key, value in config["data_path"].items():
+    for key, value in config[path_config_key].items():
         if isinstance(value, str):
-            config["data_path"][key] = os.path.expandvars(value)
+            config[path_config_key][key] = os.path.expandvars(value)
 
     return config  # 設定を返す
 
 
-# Google Driveの言語を検出する関数
 def detect_google_drive_language():
+    """Google Driveの言語を検出する関数"""
     possible_drive_letters = [
         "G:",
         "H:",
@@ -95,8 +105,8 @@ def detect_google_drive_language():
     )
 
 
-# OSと言語を検出する関数
 def detect_os_and_language():
+    """OSと言語を検出する関数"""
     os_name = platform.system().lower()  # OSの名前を取得
     if os_name == "darwin":
         return "mac", None  # Macの場合
@@ -109,132 +119,107 @@ def detect_os_and_language():
         raise ValueError(f"Unsupported OS: {os_name}")
 
 
-# データパスを取得する関数
-def get_data_path(path_key: str) -> str:
-    """データパスを取得する関数
+def get_data_path(path_key: str, use_remote_paths: bool = False) -> str:
+    """データパスを取得する関数（ローカル・リモート対応版）
 
-    path_key: config.ymlのdata_pathのキー
+    Args:
+        path_key (str): config.ymlのlocal_pathsまたはremote_pathsのキー
+        use_remote_paths (bool): True の場合 remote_paths を使用、False の場合 local_paths を使用
+
+    Returns:
+        str: 絶対パス
     """
+    # 設定ファイルを読み込む
+    config = load_config(use_remote_paths=use_remote_paths)
 
-    root_path = ch_base_dir()  # ベースディレクトリを変更
-    config = load_config()  # 設定を読み込む
+    if use_remote_paths:
+        # リモートパス（Google Drive）の場合
+        return _build_remote_path(config, path_key)
+    else:
+        # ローカルパスの場合
+        return _build_local_path(config, path_key)
 
-    os_type, *extra = detect_os_and_language()  # OSと言語を検出
-    if os_type == "win":
-        # reverse_dir()  # 元のディレクトリに戻る
-        lang, drive = extra
-        base_path = f"{drive}\\"
-        lang_path = (
-            config["data_path"]["EN"] if lang == "EN" else config["data_path"]["JP"]
-        )
-        base_path_components = config["data_path"]["base_path_components"]
-        full_base_path = os.path.join(base_path, lang_path, *base_path_components)
-        data_path = os.path.join(full_base_path, config["data_path"][path_key])
-    else:  # Mac
-        lang = extra
-        base_path = config["data_path"]["mac_base_path"]
-        base_path_components = config["data_path"]["base_path_components"]
-        lang_path = (
-            config["data_path"]["EN"] if lang == "EN" else config["data_path"]["JP"]
-        )
-        full_base_path = os.path.join(
-            base_path + ACCESS_INFORMATION, lang_path, *base_path_components
-        )
-        data_path = os.path.join(full_base_path, config["data_path"][path_key])
+
+def _build_local_path(config: dict, path_key: str) -> str:
+    """ローカルパスを構築する関数"""
+    # プロジェクトルートを取得
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)
+
+    # local_pathsからパスを取得
+    local_paths = config.get("local_paths", {})
+    local_path = local_paths.get(path_key, f"data/{path_key}")
+
+    # プロジェクトルートからの相対パスを構築
+    full_path = os.path.join(project_root, local_path)
 
     # パスの正規化と絶対パスへの変換
-    abs_path = os.path.abspath(os.path.normpath(data_path))
-    return str(abs_path)  # 文字列として返す
+    abs_path = os.path.abspath(os.path.normpath(full_path))
+    return str(abs_path)
 
 
-def create_output_folder_paths(use_google_api=False):
-    """出力フォルダのパスを作成します。"""
+def _build_remote_path(config: dict, path_key: str) -> str:
+    """リモートパス（Google Drive）を構築する関数"""
+    try:
+        # OSと言語を検出
+        os_name, lang, drive = detect_os_and_language()
 
-    trainValid_input_path = get_data_path(
-        "trainValid_input_path",
-    )
+        remote_paths = config.get("remote_paths", {})
 
-    trainValid_result_paths = {
-        "result": get_data_path(
-            "valid_out_result_path",
-        ),
-        "score": get_data_path(
-            "score_report_path",
-        ),
-        "model": get_data_path(
-            "trained_models_folder",
-        ),
-    }
+        if os_name == "win":
+            # Windows の場合
+            base_path = remote_paths.get("win_base_path", "G:/")
+            shared_folder = remote_paths.get(lang, "Shared drives")
 
-    trained_models_folder = get_data_path(
-        "trained_models_folder",
-    )
-    predict_out_path = get_data_path(
-        "predict_out_path",
-    )
+            # ベースパス構成要素を取得
+            base_components = remote_paths.get("base_path_components", [])
 
-    return (
-        trainValid_input_path,
-        trainValid_result_paths,
-        trained_models_folder,
-        predict_out_path,
-    )
+            # パスを構築
+            path_parts = [base_path, shared_folder] + base_components
 
+            # データフォルダのパスを追加
+            data_path = remote_paths.get(path_key, f"data/{path_key}")
+            if data_path.startswith("data/"):
+                data_path = data_path[5:]  # "data/" を削除
 
-# Read the AC Master Data file
-def read_ac_master_data() -> dict:
-    """
-    Reads the AC master data file and extracts relevant temperature thresholds.
-    """
-    ac_master_data_path = get_data_path("AC_master_data_path")
-    ac_master_data = pd.read_excel(ac_master_data_path)
-    master_start_mode_temperature = {
-        "cooling_start_temp": ac_master_data.loc[0, "冷房開始温度"],
-        "heating_start_temp": ac_master_data.loc[0, "暖房開始温度"],
-    }
+            path_parts.append(data_path)
 
-    print(f"ac_start_mode_temperature: {master_start_mode_temperature}")
-    return master_start_mode_temperature
+            # パスを結合
+            full_path = os.path.join(*path_parts)
 
+        elif os_name == "mac":
+            # Mac の場合
+            base_path = remote_paths.get(
+                "mac_base_path", "./Library/CloudStorage/GoogleDrive-"
+            )
+            shared_folder = remote_paths.get(
+                "EN", "Shared drives"
+            )  # Mac は英語版を想定
 
-def get_and_extract_latest_zip(raw_data_path):
-    """
-    Find the latest zip file in raw_data_path, extract it to data/temp_raw_data,
-    and return the path to the extracted folder.
-    """
-    # print all files in raw_data_path
-    print(os.listdir(raw_data_path))
+            # ベースパス構成要素を取得
+            base_components = remote_paths.get("base_path_components", [])
 
-    # Get the latest zip file
-    zip_files = [
-        f for f in os.listdir(raw_data_path) if f.endswith(".zip") and f[:8].isdigit()
-    ]
-    if not zip_files:
-        print("No zip files found in the raw_data_path")
-        return None, None
+            # パスを構築
+            path_parts = [base_path, shared_folder] + base_components
 
-    latest_zip = max(zip_files, key=lambda x: datetime.strptime(x[:8], "%Y%m%d"))
-    latest_zip_path = os.path.join(raw_data_path, latest_zip)
+            # データフォルダのパスを追加
+            data_path = remote_paths.get(path_key, f"data/{path_key}")
+            if data_path.startswith("data/"):
+                data_path = data_path[5:]  # "data/" を削除
 
-    # Prepare extraction path - use Google Drive processed data path
-    extract_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "data",
-        "temp_raw_data",
-    )
-    os.makedirs(extract_path, exist_ok=True)
+            path_parts.append(data_path)
 
-    # Extract the zip file
-    with zipfile.ZipFile(latest_zip_path, "r") as zip_ref:
-        zip_ref.extractall(extract_path)
+            # パスを結合
+            full_path = os.path.join(*path_parts)
 
-    # Get the path of the extracted folder (assuming zip contains a single folder)
-    extracted_folder = os.path.join(extract_path, os.path.splitext(latest_zip)[0])
+        else:
+            raise ValueError(f"Unsupported OS: {os_name}")
 
-    # If it's not a folder, use the extract_path
-    if not os.path.isdir(extracted_folder):
-        extracted_folder = extract_path
+        # パスの正規化と絶対パスへの変換
+        abs_path = os.path.abspath(os.path.normpath(full_path))
+        return str(abs_path)
 
-    raw_data_date = latest_zip[:8]
-
-    return extracted_folder, raw_data_date
+    except Exception as e:
+        print(f"[Warning] Remote path construction failed: {e}")
+        print("[Warning] Falling back to local path")
+        return _build_local_path(config, path_key)
