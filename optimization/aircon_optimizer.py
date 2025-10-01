@@ -35,6 +35,7 @@ import pandas as pd
 
 from optimization.optimizer import Optimizer
 from optimization.parallel_optimizer import ParallelOptimizer
+from optimization.period_optimizer import PeriodOptimizer
 from planning.planner import Planner
 from processing.aggregator import AreaAggregator
 from processing.preprocessor import DataPreprocessor
@@ -131,10 +132,10 @@ class AirconOptimizer:
         # 天候データ取得
         weather_start_time = time.perf_counter()
         if start_date is None or end_date is None:
-            # 今日〜明日
+            # 今日〜3日後（デフォルト3日間）
             today = pd.Timestamp.today().normalize()
             start_date = today.strftime("%Y-%m-%d")
-            end_date = (today + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            end_date = (today + pd.Timedelta(days=3)).strftime("%Y-%m-%d")
 
         print(f"[Run] Weather API Key provided: {weather_api_key is not None}")
         if weather_api_key:
@@ -226,9 +227,9 @@ class AirconOptimizer:
         )
         date_range = date_range[(date_range.hour >= 0) & (date_range.hour <= 23)]
 
-        # 並列処理版を使用
-        opt = ParallelOptimizer(self.master, models, max_workers=6)  # 6ゾーン分
-        schedule = opt.optimize_day(date_range, weather_df, preference=preference)
+        # 期間最適化版を使用（電力合計、室温平均で評価）
+        opt = PeriodOptimizer(self.master, models, max_workers=6)  # 6ゾーン分
+        schedule = opt.optimize_period(date_range, weather_df, preference=preference)
         optimization_end_time = time.perf_counter()
         processing_times["最適化"] = optimization_end_time - optimization_start_time
         print(

@@ -31,6 +31,7 @@ def run_optimization_for_store(
         weather_api_key=WEATHER_API_KEY,
         temperature_std_multiplier=temperature_std_multiplier,
         power_std_multiplier=power_std_multiplier,
+        preference="energy",  # 電力優先で最適化
     )
 
     if results:

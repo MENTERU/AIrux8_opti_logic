@@ -19,6 +19,7 @@ class VisualCrossingWeatherAPIDataFetcher:
         api_key: str,
         temperature_col_name: str = "Outdoor Temp.",
         humidity_col_name: str = "Outdoor Humidity",
+        solar_col_name: str = "Solar Radiation",
     ):
         self.coordinates = coordinates
         self.start_date = start_date
@@ -27,6 +28,7 @@ class VisualCrossingWeatherAPIDataFetcher:
         self.api_key = api_key
         self.temperature_col_name = temperature_col_name
         self.humidity_col_name = humidity_col_name
+        self.solar_col_name = solar_col_name
 
     def fetch(self) -> Optional[pd.DataFrame]:
         try:
@@ -62,6 +64,9 @@ class VisualCrossingWeatherAPIDataFetcher:
                             "datetime": f"{d['datetime']} {h['datetime']}",
                             self.temperature_col_name: h.get("temp"),
                             self.humidity_col_name: h.get("humidity"),
+                            self.solar_col_name: h.get(
+                                "solarradiation", 0
+                            ),  # 日射量（W/m²）
                         }
                     )
 

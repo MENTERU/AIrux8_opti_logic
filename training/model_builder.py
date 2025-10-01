@@ -50,6 +50,7 @@ class ModelBuilder:
             "A/C Fan Speed",
             "Outdoor Temp.",
             "Outdoor Humidity",
+            "Solar Radiation",  # 日射量を追加
         ]
         zones = sorted(area_df["zone"].dropna().unique().tolist())
         print(f"[ModelBuilder] Found zones: {zones}")
