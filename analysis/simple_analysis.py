@@ -63,6 +63,11 @@ def create_zone_analysis(store_name: str = "Clea"):
             "set_temp": df[f"{zone}_SetTemp"],
             "fan_speed": df[f"{zone}_FanSpeed"],
         }
+        # 予測電力・予測室温（存在する場合）
+        pred_power_col = f"{zone}_PredPower"
+        pred_temp_col = f"{zone}_PredTemp"
+        zone_pred_power = df[pred_power_col] if pred_power_col in df.columns else None
+        zone_pred_temp = df[pred_temp_col] if pred_temp_col in df.columns else None
 
         # サブプロットの作成
         fig = make_subplots(
@@ -83,7 +88,7 @@ def create_zone_analysis(store_name: str = "Clea"):
             ],
         )
 
-        # 1. 運転状態と設定温度
+        # 1. 運転状態と設定温度（+ 予測電力・予測室温）
         fig.add_trace(
             go.Scatter(
                 x=zone_data["timestamp"],
@@ -95,6 +100,18 @@ def create_zone_analysis(store_name: str = "Clea"):
             row=1,
             col=1,
         )
+        if zone_pred_temp is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=zone_data["timestamp"],
+                    y=zone_pred_temp,
+                    name="予測室温",
+                    line=dict(color="orange", width=2, dash="dot"),
+                    mode="lines+markers",
+                ),
+                row=1,
+                col=1,
+            )
         fig.add_trace(
             go.Scatter(
                 x=zone_data["timestamp"],
@@ -108,6 +125,19 @@ def create_zone_analysis(store_name: str = "Clea"):
             col=1,
             secondary_y=True,
         )
+        if zone_pred_power is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=zone_data["timestamp"],
+                    y=zone_pred_power,
+                    name="予測電力",
+                    line=dict(color="purple", width=2),
+                    mode="lines+markers",
+                ),
+                row=1,
+                col=1,
+                secondary_y=True,
+            )
 
         # 2. 運転モード
         mode_mapping = {"COOL": 0, "DEHUM": 1, "FAN": 2, "HEAT": 3}
@@ -202,8 +232,8 @@ def create_zone_analysis(store_name: str = "Clea"):
         # 軸ラベルの設定
         fig.update_xaxes(title_text="時間", row=3, col=1)
         fig.update_xaxes(title_text="時間", row=3, col=2)
-        fig.update_yaxes(title_text="設定温度 (°C)", row=1, col=1)
-        fig.update_yaxes(title_text="運転状態", row=1, col=1, secondary_y=True)
+        fig.update_yaxes(title_text="設定温度/室温 (°C)", row=1, col=1)
+        fig.update_yaxes(title_text="運転状態/電力 (W)", row=1, col=1, secondary_y=True)
         fig.update_yaxes(title_text="モード", row=1, col=2)
         fig.update_yaxes(title_text="ファン速度", row=2, col=1)
         fig.update_yaxes(title_text="頻度", row=2, col=2)

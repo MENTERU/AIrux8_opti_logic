@@ -1,5 +1,6 @@
 import os
 from typing import Dict, List
+import numpy as np
 
 import pandas as pd
 
@@ -40,6 +41,11 @@ class Planner:
                 rec[f"{z}_Mode"] = self._mode_text(s.get("mode", 2)) if s else "FAN"
                 rec[f"{z}_SetTemp"] = s.get("set_temp", 25) if s else 25
                 rec[f"{z}_FanSpeed"] = s.get("fan", 1) if s else 1
+                # 予測電力・予測室温（可視化用）
+                rec[f"{z}_PredPower"] = float(s.get("pred_power", 0.0)) if s else 0.0
+                rec[f"{z}_PredTemp"] = (
+                    float(s.get("pred_temp", np.nan)) if s else np.nan
+                )
             rows.append(rec)
         ctrl_df = pd.DataFrame(rows)
         ctrl_path = os.path.join(out_dir, f"control_type_schedule_{date_str}.csv")
