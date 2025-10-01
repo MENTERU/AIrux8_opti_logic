@@ -39,11 +39,16 @@ class DataPreprocessor:
         return df.drop_duplicates(subset=[dt_col, dev_col]) if dev_col else df
 
     @staticmethod
-    def _rm_outliers(df: pd.DataFrame, cols: List[str], k: float = 3.0) -> pd.DataFrame:
-        for c in cols:
-            if c in df.columns:
-                m, s = df[c].mean(), df[c].std()
-                df = df[(df[c] - m).abs() <= k * s]
+    def _rm_outliers(
+        df: pd.DataFrame, columns: List[str], standard_deviation_multiplier: float = 3.0
+    ) -> pd.DataFrame:
+        for column in columns:
+            if column in df.columns:
+                mean_value, standard_deviation = df[column].mean(), df[column].std()
+                df = df[
+                    (df[column] - mean_value).abs()
+                    <= standard_deviation_multiplier * standard_deviation
+                ]
         return df
 
     def load_raw(self) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
@@ -86,59 +91,76 @@ class DataPreprocessor:
         return ac, pm
 
     def preprocess_ac(
-        self, df: Optional[pd.DataFrame], std_k: float = 3.0
+        self,
+        dataframe: Optional[pd.DataFrame],
+        standard_deviation_multiplier: float = 5.0,
+        category_mapping: Optional[dict] = None,
     ) -> Optional[pd.DataFrame]:
-        if df is None or df.empty:
+        if dataframe is None or dataframe.empty:
             return None
-        df, dt = self._unify_datetime(df)
-        if df is None:
+        dataframe, datetime_column = self._unify_datetime(dataframe)
+        if dataframe is None:
             return None
-        df = self._rm_dup(df, dt)
-        df = self._rm_outliers(
-            df, ["A/C Set Temperature", "Indoor Temp.", "Outdoor Temp."], std_k
+        dataframe = self._rm_dup(dataframe, datetime_column)
+        dataframe = self._rm_outliers(
+            dataframe,
+            ["A/C Set Temperature", "Indoor Temp.", "Outdoor Temp."],
+            standard_deviation_multiplier,
         )
-        for c in ["A/C Set Temperature", "Indoor Temp.", "Outdoor Temp."]:
-            if c in df.columns:
-                df[c] = df[c].interpolate("linear")
-        # カテゴリ変換（固定ルール。必要ならマスタで上書き可）
-        mapping = {
-            "A/C ON/OFF": {"0": 0, "1": 1, 0: 0, 1: 1},
-            "A/C Mode": {"COOL": 0, "DEHUM": 1, "FAN": 2, "HEAT": 3},
-            "A/C Fan Speed": {"Auto": 0, "Low": 1, "Medium": 2, "High": 3, "Top": 4},
-        }
-        for c, m in mapping.items():
-            if c in df.columns:
-                df[c] = df[c].map(m).fillna(-1)
-        df["datetime"] = df[dt]
-        df["date"] = df[dt].dt.date
-        return df
+        for column in ["A/C Set Temperature", "Indoor Temp.", "Outdoor Temp."]:
+            if column in dataframe.columns:
+                dataframe[column] = dataframe[column].interpolate("linear")
+
+        # カテゴリ変換（設定から取得、デフォルト値も設定）
+        if category_mapping is None:
+            from config.utils import load_config
+
+            config = load_config()
+            category_mapping = config.get("preprocessing", {}).get(
+                "category_mapping", {}
+            )
+
+        for column, mapping_dict in category_mapping.items():
+            if column in dataframe.columns:
+                dataframe[column] = dataframe[column].map(mapping_dict).fillna(-1)
+        dataframe["datetime"] = dataframe[datetime_column]
+        dataframe["date"] = dataframe[datetime_column].dt.date
+        return dataframe
 
     def preprocess_pm(
-        self, df: Optional[pd.DataFrame], std_k: float = 3.0
+        self,
+        dataframe: Optional[pd.DataFrame],
+        standard_deviation_multiplier: float = 5.0,
     ) -> Optional[pd.DataFrame]:
-        if df is None or df.empty:
+        if dataframe is None or dataframe.empty:
             return None
-        df, dt = self._unify_datetime(df)
-        if df is None:
+        dataframe, datetime_column = self._unify_datetime(dataframe)
+        if dataframe is None:
             return None
-        df = self._rm_dup(df, dt)
-        df = self._rm_outliers(df, ["Phase A"], std_k)
-        df["Phase A"] = df["Phase A"].fillna(0)
-        df["datetime"] = df[dt]
-        df["date"] = df[dt].dt.date
-        return df
+        dataframe = self._rm_dup(dataframe, datetime_column)
+        dataframe = self._rm_outliers(
+            dataframe, ["Phase A"], standard_deviation_multiplier
+        )
+        dataframe["Phase A"] = dataframe["Phase A"].fillna(0)
+        dataframe["datetime"] = dataframe[datetime_column]
+        dataframe["date"] = dataframe[datetime_column].dt.date
+        return dataframe
 
-    def save(self, ac: Optional[pd.DataFrame], pm: Optional[pd.DataFrame]):
-        if ac is not None:
-            ac.to_csv(
+    def save(
+        self,
+        ac_control_data: Optional[pd.DataFrame],
+        power_meter_data: Optional[pd.DataFrame],
+    ):
+        if ac_control_data is not None:
+            ac_control_data.to_csv(
                 os.path.join(
                     self.output_dir, f"ac_control_processed_{self.store_name}.csv"
                 ),
                 index=False,
                 encoding="utf-8-sig",
             )
-        if pm is not None:
-            pm.to_csv(
+        if power_meter_data is not None:
+            power_meter_data.to_csv(
                 os.path.join(
                     self.output_dir, f"power_meter_processed_{self.store_name}.csv"
                 ),

@@ -7,27 +7,31 @@ from optimization.aircon_optimizer import AirconOptimizer
 
 
 def run_optimization_for_store(
-    store_name, std_multiplier_temp=3.0, std_multiplier_power=3.0
+    store_name, temperature_std_multiplier=5.0, power_std_multiplier=5.0
 ):
     """
     指定されたストアの最適化を実行
 
     Args:
         store_name (str): 対象ストア名
-        std_multiplier_temp (float): 温度データの外れ値判定係数
-        std_multiplier_power (float): 電力データの外れ値判定係数
+        temperature_std_multiplier (float): 温度データの外れ値判定係数（デフォルト: 5.0）
+        power_std_multiplier (float): 電力データの外れ値判定係数（デフォルト: 5.0）
     """
     print(f"🚀 {store_name}の最適化パイプライン開始")
 
-    # 最適化システムの初期化（前処理を実行）
+    # 最適化システムの初期化（前処理をスキップ）
     enable_preprocessing = False
     optimizer = AirconOptimizer(
         store_name,
         enable_preprocessing=enable_preprocessing,
     )
 
-    # フルパイプラインの実行
-    results = optimizer.run(weather_api_key=WEATHER_API_KEY)
+    # フルパイプラインの実行（座標はマスタから自動取得）
+    results = optimizer.run(
+        weather_api_key=WEATHER_API_KEY,
+        temperature_std_multiplier=temperature_std_multiplier,
+        power_std_multiplier=power_std_multiplier,
+    )
 
     if results:
         print(f"🎉 {store_name}の最適化が完了しました")
@@ -53,8 +57,8 @@ def main():
 
         success = run_optimization_for_store(
             store_name=store_name,
-            std_multiplier_temp=3.0,
-            std_multiplier_power=3.0,
+            temperature_std_multiplier=5.0,
+            power_std_multiplier=5.0,
         )
 
         if success:
