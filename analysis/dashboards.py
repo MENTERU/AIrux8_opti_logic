@@ -20,10 +20,14 @@ def _load_actual(store_name: str) -> Optional[pd.DataFrame]:
         print(f"❌ 実績データが見つかりません: {path}")
         return None
     df = pd.read_csv(path)
-    if "datetime" not in df.columns:
-        print("❌ 実績データに datetime 列がありません")
+    # Datetime 列の互換対応
+    if "datetime" in df.columns:
+        df["datetime"] = pd.to_datetime(df["datetime"])
+    elif "Datetime" in df.columns:
+        df["datetime"] = pd.to_datetime(df["Datetime"])  # 統一
+    else:
+        print("❌ 実績データに Datetime/datetime 列がありません")
         return None
-    df["datetime"] = pd.to_datetime(df["datetime"])
     return df
 
 
@@ -52,7 +56,8 @@ def _load_plan(store_name: str) -> Optional[pd.DataFrame]:
 
 def _load_weather_forecast(store_name: str) -> Optional[pd.DataFrame]:
     """天気予報データを読み込み"""
-    path = f"data/04_OutputData/{store_name}/weather_forecast.csv"
+    # 保存先は PlanningData に統一
+    path = f"data/04_PlanningData/{store_name}/weather_forecast.csv"
     if not os.path.exists(path):
         print(f"❌ 天気予報データが見つかりません: {path}")
         return None

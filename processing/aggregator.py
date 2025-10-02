@@ -32,7 +32,16 @@ class AreaAggregator:
         # 天候（共通）
         weather = weather.copy() if weather is not None else pd.DataFrame()
         if not weather.empty:
-            weather["Datetime"] = pd.to_datetime(weather["Datetime"]).dt.floor(freq)
+            # 天気データの列名を統一（datetime -> Datetime）
+            if "datetime" in weather.columns:
+                weather["Datetime"] = pd.to_datetime(weather["datetime"]).dt.floor(freq)
+            elif "Datetime" in weather.columns:
+                weather["Datetime"] = pd.to_datetime(weather["Datetime"]).dt.floor(freq)
+            else:
+                print(
+                    f"⚠️ 天気データにDatetime列が見つかりません。利用可能な列: {list(weather.columns)}"
+                )
+                return pd.DataFrame()
             wcols = [
                 c
                 for c in [

@@ -138,12 +138,28 @@ class AirconOptimizer:
         try:
             if ac_processed_data is not None and not ac_processed_data.empty:
                 ac_dt = pd.to_datetime(ac_processed_data.get("datetime"))
-                actual_start_dt = ac_dt.min() if actual_start_dt is None else min(actual_start_dt, ac_dt.min())
-                actual_end_dt = ac_dt.max() if actual_end_dt is None else max(actual_end_dt, ac_dt.max())
+                actual_start_dt = (
+                    ac_dt.min()
+                    if actual_start_dt is None
+                    else min(actual_start_dt, ac_dt.min())
+                )
+                actual_end_dt = (
+                    ac_dt.max()
+                    if actual_end_dt is None
+                    else max(actual_end_dt, ac_dt.max())
+                )
             if pm_processed_data is not None and not pm_processed_data.empty:
                 pm_dt = pd.to_datetime(pm_processed_data.get("datetime"))
-                actual_start_dt = pm_dt.min() if actual_start_dt is None else min(actual_start_dt, pm_dt.min())
-                actual_end_dt = pm_dt.max() if actual_end_dt is None else max(actual_end_dt, pm_dt.max())
+                actual_start_dt = (
+                    pm_dt.min()
+                    if actual_start_dt is None
+                    else min(actual_start_dt, pm_dt.min())
+                )
+                actual_end_dt = (
+                    pm_dt.max()
+                    if actual_end_dt is None
+                    else max(actual_end_dt, pm_dt.max())
+                )
         except Exception:
             # 無視（実績期間が取れない場合は最適化期間のみ）
             pass
@@ -186,7 +202,9 @@ class AirconOptimizer:
                 while cur <= combined_end_dt:
                     chunk_start = cur
                     # 月末まで or combined_end_dt まで
-                    next_month = (chunk_start.replace(day=1) + pd.offsets.MonthEnd(1)).to_pydatetime()
+                    next_month = (
+                        chunk_start.replace(day=1) + pd.offsets.MonthEnd(1)
+                    ).to_pydatetime()
                     chunk_end = pd.Timestamp(min(next_month, combined_end_dt))
                     s = chunk_start.strftime("%Y-%m-%d")
                     e = chunk_end.strftime("%Y-%m-%d")
@@ -209,8 +227,12 @@ class AirconOptimizer:
                     weather_df = pd.concat(chunks, axis=0, ignore_index=True)
                     # 重複除去
                     if "datetime" in weather_df.columns:
-                        weather_df["datetime"] = pd.to_datetime(weather_df["datetime"]).dt.floor("H")
-                        weather_df = weather_df.drop_duplicates(subset=["datetime"]).sort_values("datetime")
+                        weather_df["datetime"] = pd.to_datetime(
+                            weather_df["datetime"]
+                        ).dt.floor("H")
+                        weather_df = weather_df.drop_duplicates(
+                            subset=["datetime"]
+                        ).sort_values("datetime")
                 print(f"[Run] Weather API result: {weather_df is not None}")
                 if weather_df is not None:
                     print(f"[Run] Weather data shape: {weather_df.shape}")
@@ -245,22 +267,90 @@ class AirconOptimizer:
                 f"[Run] Adjusted power data: {area_df['adjusted_power'].notna().sum() if 'adjusted_power' in area_df.columns else 'No adjusted_power column'}"
             )
 
+        # 特徴量の確認と相関の簡易レポート
+        if area_df is not None:
+            base_feats = [
+                "A/C Set Temperature",
+                "Indoor Temp. Lag1",
+                "A/C ON/OFF",
+                "A/C Mode",
+                "A/C Fan Speed",
+                "Outdoor Temp.",
+                "Outdoor Humidity",
+                "Solar Radiation",
+                "DayOfWeek",
+                "Hour",
+                "Month",
+                "IsWeekend",
+                "IsHoliday",
+            ]
+            available_feats = [col for col in base_feats if col in area_df.columns]
+            missing_feats = [col for col in base_feats if col not in area_df.columns]
+
+            print(f"\n✅ 利用可能な特徴量 ({len(available_feats)}個):")
+            for feat in available_feats:
+                print(f"  - {feat}")
+
+            if missing_feats:
+                print(f"\n⚠️ 不足している特徴量 ({len(missing_feats)}個):")
+                for feat in missing_feats:
+                    print(f"  - {feat}")
+
+            # 相関行列の作成（存在する列のみで計算）
+            target_cols = [
+                c
+                for c in (available_feats + ["Indoor Temp.", "adjusted_power"])
+                if c in area_df.columns
+            ]
+            if target_cols:
+                print(f"\n🔍 特徴量間の相関確認:")
+                corr_matrix = area_df[target_cols].corr(numeric_only=True)
+
+                if "Indoor Temp." in corr_matrix.columns:
+                    temp_corr = (
+                        corr_matrix["Indoor Temp."]
+                        .drop(
+                            labels=[
+                                c for c in ["Indoor Temp."] if c in corr_matrix.index
+                            ]
+                        )
+                        .abs()
+                        .sort_values(ascending=False)
+                    )
+                    print(f"\n🌡️ 室温との相関 (上位10位):")
+                    for feat, corr in temp_corr.head(10).items():
+                        print(f"  {feat}: {corr:.3f}")
+
+                if "adjusted_power" in corr_matrix.columns:
+                    power_corr = (
+                        corr_matrix["adjusted_power"]
+                        .drop(
+                            labels=[
+                                c for c in ["adjusted_power"] if c in corr_matrix.index
+                            ]
+                        )
+                        .abs()
+                        .sort_values(ascending=False)
+                    )
+                    print(f"\n⚡ 電力との相関 (上位10位):")
+                    for feat, corr in power_corr.head(10).items():
+                        print(f"  {feat}: {corr:.3f}")
+
         area_out = os.path.join(
             self.proc_dir, f"features_processed_{self.store_name}.csv"
         )
         os.makedirs(self.proc_dir, exist_ok=True)
         area_df.to_csv(area_out, index=False, encoding="utf-8-sig")
         print(f"[Run] Area data saved to: {area_out}")
-        
+
         # 天気予報データの出力（最適化期間のみ）
         if weather_df is not None:
             forecast_df = weather_df[
                 (weather_df["datetime"] >= pd.to_datetime(start_date))
                 & (weather_df["datetime"] <= pd.to_datetime(end_date))
             ].copy()
-            forecast_path = os.path.join(
-                get_data_path("output_data_path"), store_name, "weather_forecast.csv"
-            )
+            # 出力先は初期化時に計算した plan_dir を利用
+            forecast_path = os.path.join(self.plan_dir, "weather_forecast.csv")
             os.makedirs(os.path.dirname(forecast_path), exist_ok=True)
             forecast_df.to_csv(forecast_path, index=False, encoding="utf-8-sig")
             print(f"[Run] Weather forecast saved to: {forecast_path}")
