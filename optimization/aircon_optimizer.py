@@ -129,13 +129,40 @@ class AirconOptimizer:
             print("[Run] Loading processed data...")
             ac_processed_data, pm_processed_data = self._load_processed()
             print("[Run] Processed data loaded")
-        # 天候データ取得
+        # 天候データ取得（実績期間＋最適化期間をカバー）
         weather_start_time = time.perf_counter()
+
+        # 実績期間の推定（前処理済みデータから）
+        actual_start_dt = None
+        actual_end_dt = None
+        try:
+            if ac_processed_data is not None and not ac_processed_data.empty:
+                ac_dt = pd.to_datetime(ac_processed_data.get("datetime"))
+                actual_start_dt = ac_dt.min() if actual_start_dt is None else min(actual_start_dt, ac_dt.min())
+                actual_end_dt = ac_dt.max() if actual_end_dt is None else max(actual_end_dt, ac_dt.max())
+            if pm_processed_data is not None and not pm_processed_data.empty:
+                pm_dt = pd.to_datetime(pm_processed_data.get("datetime"))
+                actual_start_dt = pm_dt.min() if actual_start_dt is None else min(actual_start_dt, pm_dt.min())
+                actual_end_dt = pm_dt.max() if actual_end_dt is None else max(actual_end_dt, pm_dt.max())
+        except Exception:
+            # 無視（実績期間が取れない場合は最適化期間のみ）
+            pass
+
+        # 最適化期間の既定
         if start_date is None or end_date is None:
-            # 今日〜3日後（デフォルト3日間）
             today = pd.Timestamp.today().normalize()
             start_date = today.strftime("%Y-%m-%d")
             end_date = (today + pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+
+        # 実績期間と最適化期間を統合した取得レンジ
+        combined_start_dt = pd.to_datetime(start_date)
+        combined_end_dt = pd.to_datetime(end_date)
+        if actual_start_dt is not None:
+            combined_start_dt = min(combined_start_dt, actual_start_dt.normalize())
+        if actual_end_dt is not None:
+            combined_end_dt = max(combined_end_dt, actual_end_dt.normalize())
+        combined_start_date = combined_start_dt.strftime("%Y-%m-%d")
+        combined_end_date = combined_end_dt.strftime("%Y-%m-%d")
 
         print(f"[Run] Weather API Key provided: {weather_api_key is not None}")
         if weather_api_key:
@@ -143,20 +170,47 @@ class AirconOptimizer:
         else:
             print("[Run] No Weather API Key provided")
 
-        print(f"[Run] Date range: {start_date} to {end_date}")
+        print(f"[Run] Date range (optimization): {start_date} to {end_date}")
+        print(
+            f"[Run] Date range (weather fetch combined): {combined_start_date} to {combined_end_date}"
+        )
         print(f"[Run] Coordinates: {coordinates}")
 
         weather_df = None
         if weather_api_key:
             print("[Run] Attempting to fetch weather data from API...")
             try:
-                weather_df = VisualCrossingWeatherAPIDataFetcher(
-                    coordinates=coordinates,
-                    start_date=start_date,
-                    end_date=end_date,
-                    unit="metric",
-                    api_key=weather_api_key,
-                ).fetch()
+                # 月次チャンクで分割取得（APIコスト回避）
+                cur = combined_start_dt
+                chunks = []
+                while cur <= combined_end_dt:
+                    chunk_start = cur
+                    # 月末まで or combined_end_dt まで
+                    next_month = (chunk_start.replace(day=1) + pd.offsets.MonthEnd(1)).to_pydatetime()
+                    chunk_end = pd.Timestamp(min(next_month, combined_end_dt))
+                    s = chunk_start.strftime("%Y-%m-%d")
+                    e = chunk_end.strftime("%Y-%m-%d")
+                    print(f"[Weather] Fetching chunk: {s} -> {e}")
+                    try:
+                        chunk_df = VisualCrossingWeatherAPIDataFetcher(
+                            coordinates=coordinates,
+                            start_date=s,
+                            end_date=e,
+                            unit="metric",
+                            api_key=weather_api_key,
+                        ).fetch()
+                        if chunk_df is not None and not chunk_df.empty:
+                            chunks.append(chunk_df)
+                    except Exception as ce:
+                        print(f"[Weather] Chunk fetch failed: {ce}")
+                    # 次の開始は翌月1日
+                    cur = (chunk_end + pd.Timedelta(days=1)).normalize()
+                if chunks:
+                    weather_df = pd.concat(chunks, axis=0, ignore_index=True)
+                    # 重複除去
+                    if "datetime" in weather_df.columns:
+                        weather_df["datetime"] = pd.to_datetime(weather_df["datetime"]).dt.floor("H")
+                        weather_df = weather_df.drop_duplicates(subset=["datetime"]).sort_values("datetime")
                 print(f"[Run] Weather API result: {weather_df is not None}")
                 if weather_df is not None:
                     print(f"[Run] Weather data shape: {weather_df.shape}")
@@ -197,6 +251,19 @@ class AirconOptimizer:
         os.makedirs(self.proc_dir, exist_ok=True)
         area_df.to_csv(area_out, index=False, encoding="utf-8-sig")
         print(f"[Run] Area data saved to: {area_out}")
+        
+        # 天気予報データの出力（最適化期間のみ）
+        if weather_df is not None:
+            forecast_df = weather_df[
+                (weather_df["datetime"] >= pd.to_datetime(start_date))
+                & (weather_df["datetime"] <= pd.to_datetime(end_date))
+            ].copy()
+            forecast_path = os.path.join(
+                get_data_path("output_data_path"), store_name, "weather_forecast.csv"
+            )
+            os.makedirs(os.path.dirname(forecast_path), exist_ok=True)
+            forecast_df.to_csv(forecast_path, index=False, encoding="utf-8-sig")
+            print(f"[Run] Weather forecast saved to: {forecast_path}")
 
         aggregation_end_time = time.perf_counter()
         processing_times["エリア集約"] = aggregation_end_time - aggregation_start_time

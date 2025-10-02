@@ -90,11 +90,256 @@ class DataPreprocessor:
 
         return ac, pm
 
+    def _apply_categorical_mapping(
+        self, dataframe: pd.DataFrame, column: str, mapping_dict: dict
+    ) -> pd.DataFrame:
+        """共通のカテゴリカル変数マッピングを適用"""
+        # マッピング前の値の確認
+        original_values = dataframe[column].value_counts()
+        print(
+            f"[DataPreprocessor] {column} マッピング前の値: "
+            f"{original_values.head().to_dict()}"
+        )
+
+        # マッピング実行
+        dataframe[column] = dataframe[column].map(mapping_dict)
+
+        # マッピングされなかった値の確認
+        unmapped_mask = dataframe[column].isnull()
+        if unmapped_mask.any():
+            unmapped_values = dataframe.loc[unmapped_mask, column].value_counts()
+            print(
+                f"[DataPreprocessor] {column} マッピングされなかった値: "
+                f"{unmapped_values.to_dict()}"
+            )
+
+            # デフォルト値の設定
+            if column == "A/C ON/OFF":
+                default_value = 0  # OFFをデフォルト
+            elif column == "A/C Mode":
+                default_value = 2  # FANをデフォルト
+            elif column == "A/C Fan Speed":
+                default_value = 1  # Lowをデフォルト
+            else:
+                default_value = 0
+
+            dataframe[column] = dataframe[column].fillna(default_value)
+            print(
+                f"[DataPreprocessor] {column} デフォルト値({default_value})で置換: "
+                f"{unmapped_mask.sum()}件"
+            )
+        else:
+            print(f"[DataPreprocessor] {column} 全ての値が正常にマッピングされました")
+
+        return dataframe
+
+    def _apply_zone_specific_mapping(self, dataframe: pd.DataFrame) -> pd.DataFrame:
+        """エリア別のカテゴリカル変数マッピングを適用"""
+        import json
+        import os
+        from datetime import datetime
+
+        # ログファイルの準備
+        log_dir = f"logs/preprocessing/{self.store_name}"
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(
+            log_dir, f"zone_mapping_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+
+        # エリア別のマッピングログ
+        zone_mapping_log = {
+            "store_name": self.store_name,
+            "timestamp": datetime.now().isoformat(),
+            "zones": {},
+        }
+
+        # エリア別に処理
+        if "A/C Name" in dataframe.columns:
+            # A/C Nameからエリアを推定（命名規則に基づく）
+            dataframe["zone"] = dataframe["A/C Name"].str.extract(
+                r"([A-Za-z]+(?:\s+[A-Za-z]+)*)"
+            )[0]
+            dataframe["zone"] = dataframe["zone"].fillna("Unknown")
+        else:
+            dataframe["zone"] = "Unknown"
+
+        for zone in dataframe["zone"].unique():
+            if zone == "Unknown":
+                continue
+
+            print(f"\n[DataPreprocessor] エリア '{zone}' のカテゴリカル変数処理開始")
+            zone_data = dataframe[dataframe["zone"] == zone].copy()
+            zone_log = {
+                "zone_name": zone,
+                "total_records": len(zone_data),
+                "categorical_mappings": {},
+            }
+
+            # 各カテゴリカル変数を処理
+            for column in ["A/C ON/OFF", "A/C Mode", "A/C Fan Speed"]:
+                if column in zone_data.columns:
+                    print(f"[DataPreprocessor] {zone} - {column} 処理中...")
+
+                    # エリア固有の値の分析
+                    unique_values = zone_data[column].value_counts()
+                    print(
+                        f"[DataPreprocessor] {zone} - {column} ユニーク値: {unique_values.to_dict()}"
+                    )
+
+                    # 自動マッピング生成
+                    mapping = self._generate_zone_mapping(zone, column, unique_values)
+                    zone_log["categorical_mappings"][column] = {
+                        "original_values": unique_values.to_dict(),
+                        "mapping": mapping,
+                        "mapped_count": len(unique_values),
+                        "unmapped_count": 0,
+                    }
+
+                    # マッピング適用
+                    zone_data[column] = zone_data[column].map(mapping)
+
+                    # マッピングされなかった値の処理
+                    unmapped_mask = zone_data[column].isnull()
+                    if unmapped_mask.any():
+                        unmapped_values = zone_data.loc[
+                            unmapped_mask, column
+                        ].value_counts()
+                        print(
+                            f"[DataPreprocessor] {zone} - {column} マッピングされなかった値: {unmapped_values.to_dict()}"
+                        )
+
+                        # デフォルト値設定
+                        default_value = self._get_default_value(column)
+                        zone_data[column] = zone_data[column].fillna(default_value)
+
+                        zone_log["categorical_mappings"][column][
+                            "unmapped_values"
+                        ] = unmapped_values.to_dict()
+                        zone_log["categorical_mappings"][column][
+                            "unmapped_count"
+                        ] = unmapped_mask.sum()
+                        zone_log["categorical_mappings"][column][
+                            "default_value"
+                        ] = default_value
+
+                        print(
+                            f"[DataPreprocessor] {zone} - {column} デフォルト値({default_value})で置換: {unmapped_mask.sum()}件"
+                        )
+
+                    # 元のデータフレームを更新
+                    dataframe.loc[dataframe["zone"] == zone, column] = zone_data[column]
+
+            zone_mapping_log["zones"][zone] = zone_log
+
+        # ログファイルに保存
+        with open(log_file, "w", encoding="utf-8") as f:
+            json.dump(zone_mapping_log, f, ensure_ascii=False, indent=2)
+
+        print(f"\n[DataPreprocessor] エリア別マッピングログ保存: {log_file}")
+
+        # エリア列を削除（元のデータ構造を維持）
+        dataframe = dataframe.drop("zone", axis=1)
+
+        return dataframe
+
+    def _generate_zone_mapping(
+        self, zone: str, column: str, unique_values: pd.Series
+    ) -> dict:
+        """エリア固有のマッピングを自動生成"""
+        mapping = {}
+
+        for value in unique_values.index:
+            if pd.isna(value):
+                continue
+
+            # 値の正規化
+            normalized_value = str(value).strip().upper()
+
+            if column == "A/C ON/OFF":
+                if any(
+                    keyword in normalized_value
+                    for keyword in ["ON", "1", "TRUE", "有効"]
+                ):
+                    mapping[value] = 1
+                elif any(
+                    keyword in normalized_value
+                    for keyword in ["OFF", "0", "FALSE", "無効"]
+                ):
+                    mapping[value] = 0
+                else:
+                    # デフォルトはOFF
+                    mapping[value] = 0
+
+            elif column == "A/C Mode":
+                if any(
+                    keyword in normalized_value
+                    for keyword in ["COOL", "冷房", "COOLING"]
+                ):
+                    mapping[value] = 0
+                elif any(
+                    keyword in normalized_value
+                    for keyword in ["DEHUM", "除湿", "DEHUMIDIFY"]
+                ):
+                    mapping[value] = 1
+                elif any(
+                    keyword in normalized_value
+                    for keyword in ["FAN", "送風", "FAN_ONLY"]
+                ):
+                    mapping[value] = 2
+                elif any(
+                    keyword in normalized_value
+                    for keyword in ["HEAT", "暖房", "HEATING"]
+                ):
+                    mapping[value] = 3
+                else:
+                    # デフォルトはFAN
+                    mapping[value] = 2
+
+            elif column == "A/C Fan Speed":
+                if any(
+                    keyword in normalized_value
+                    for keyword in ["AUTO", "自動", "AUTOMATIC"]
+                ):
+                    mapping[value] = 0
+                elif any(keyword in normalized_value for keyword in ["LOW", "低", "1"]):
+                    mapping[value] = 1
+                elif any(
+                    keyword in normalized_value
+                    for keyword in ["MEDIUM", "中", "2", "MID"]
+                ):
+                    mapping[value] = 2
+                elif any(
+                    keyword in normalized_value for keyword in ["HIGH", "高", "3"]
+                ):
+                    mapping[value] = 3
+                elif any(
+                    keyword in normalized_value
+                    for keyword in ["TOP", "最高", "4", "MAX"]
+                ):
+                    mapping[value] = 4
+                else:
+                    # デフォルトはLow
+                    mapping[value] = 1
+
+        return mapping
+
+    def _get_default_value(self, column: str) -> int:
+        """カラム別のデフォルト値を取得"""
+        if column == "A/C ON/OFF":
+            return 0  # OFF
+        elif column == "A/C Mode":
+            return 2  # FAN
+        elif column == "A/C Fan Speed":
+            return 1  # Low
+        else:
+            return 0
+
     def preprocess_ac(
         self,
         dataframe: Optional[pd.DataFrame],
         standard_deviation_multiplier: float = 5.0,
         category_mapping: Optional[dict] = None,
+        zone_specific_mapping: bool = True,
     ) -> Optional[pd.DataFrame]:
         if dataframe is None or dataframe.empty:
             return None
@@ -104,27 +349,31 @@ class DataPreprocessor:
         dataframe = self._rm_dup(dataframe, datetime_column)
         dataframe = self._rm_outliers(
             dataframe,
-            ["A/C Set Temperature", "Indoor Temp.", "Outdoor Temp."],
+            ["Indoor Temp.", "Outdoor Temp."],
             standard_deviation_multiplier,
         )
-        for column in ["A/C Set Temperature", "Indoor Temp.", "Outdoor Temp."]:
+        for column in ["Indoor Temp.", "Outdoor Temp."]:
             if column in dataframe.columns:
                 dataframe[column] = dataframe[column].interpolate("linear")
 
-        # カテゴリ変換（設定から取得、デフォルト値も設定）
-        if category_mapping is None:
-            from config.utils import load_config
+        # カテゴリ変換は前処理段階では行わない
+        # 後段階（集約時）でエリア別マッピングを実行
+        print("[DataPreprocessor] カテゴリカル変数のマッピングは後段階で実行します")
 
-            config = load_config()
-            category_mapping = config.get("preprocessing", {}).get(
-                "category_mapping", {}
-            )
+        # 列名を統一（Datetime, Date）
+        dataframe["Datetime"] = dataframe[datetime_column]
+        dataframe["Date"] = dataframe[datetime_column].dt.date
 
-        for column, mapping_dict in category_mapping.items():
-            if column in dataframe.columns:
-                dataframe[column] = dataframe[column].map(mapping_dict).fillna(-1)
-        dataframe["datetime"] = dataframe[datetime_column]
-        dataframe["date"] = dataframe[datetime_column].dt.date
+        # 列の並び順を調整（Datetime, Dateを最初に配置）
+        cols = list(dataframe.columns)
+        if "Datetime" in cols:
+            cols.remove("Datetime")
+        if "Date" in cols:
+            cols.remove("Date")
+
+        # Datetime, Dateを最初に配置
+        dataframe = dataframe[["Datetime", "Date"] + cols]
+
         return dataframe
 
     def preprocess_pm(
@@ -138,12 +387,33 @@ class DataPreprocessor:
         if dataframe is None:
             return None
         dataframe = self._rm_dup(dataframe, datetime_column)
+        # Total_kWh列を先に作成してから外れ値除去
+        phase_columns = [col for col in dataframe.columns if col.startswith("Phase")]
+        if phase_columns:
+            dataframe["Total_kWh"] = dataframe[phase_columns].sum(axis=1)
+        else:
+            dataframe["Total_kWh"] = dataframe["Phase A"]
+
         dataframe = self._rm_outliers(
-            dataframe, ["Phase A"], standard_deviation_multiplier
+            dataframe, ["Total_kWh"], standard_deviation_multiplier
         )
         dataframe["Phase A"] = dataframe["Phase A"].fillna(0)
-        dataframe["datetime"] = dataframe[datetime_column]
-        dataframe["date"] = dataframe[datetime_column].dt.date
+        dataframe["Total_kWh"] = dataframe["Total_kWh"].fillna(0)
+
+        # 列名を統一（Datetime, Date）
+        dataframe["Datetime"] = dataframe[datetime_column]
+        dataframe["Date"] = dataframe[datetime_column].dt.date
+
+        # 列の並び順を調整（Datetime, Dateを最初に配置）
+        cols = list(dataframe.columns)
+        if "Datetime" in cols:
+            cols.remove("Datetime")
+        if "Date" in cols:
+            cols.remove("Date")
+
+        # Datetime, Dateを最初に配置
+        dataframe = dataframe[["Datetime", "Date"] + cols]
+
         return dataframe
 
     def save(

@@ -18,6 +18,7 @@ class EnvPowerModels:
     temp_model: RandomForestRegressor
     hum_model: Optional[RandomForestRegressor]
     power_model: RandomForestRegressor
+    multi_output_model: Optional[RandomForestRegressor]  # マルチアウトプットモデル
     feature_cols: List[str]
 
 
@@ -36,13 +37,14 @@ class ModelBuilder:
         self, area_df: pd.DataFrame, master: dict
     ) -> Dict[str, EnvPowerModels]:
         print(
-            f"[ModelBuilder] Starting train_by_zone. Input shape: {area_df.shape if area_df is not None else 'None'}"
+            f"[ModelBuilder] Starting train_by_zone. "
+            f"Input shape: {area_df.shape if area_df is not None else 'None'}"
         )
         if area_df is None or area_df.empty:
             print("[ModelBuilder] Area data is None or empty")
             return {}
         models: Dict[str, EnvPowerModels] = {}
-        feats = [
+        base_feats = [
             "A/C Set Temperature",
             "Indoor Temp. Lag1",
             "A/C ON/OFF",
@@ -50,7 +52,13 @@ class ModelBuilder:
             "A/C Fan Speed",
             "Outdoor Temp.",
             "Outdoor Humidity",
-            "Solar Radiation",  # 日射量を追加
+            "Solar Radiation",  # 日射量
+            # 時間特徴
+            "DayOfWeek",
+            "Hour",
+            "Month",
+            "IsWeekend",
+            "IsHoliday",
         ]
         zones = sorted(area_df["zone"].dropna().unique().tolist())
         print(f"[ModelBuilder] Found zones: {zones}")
@@ -59,9 +67,14 @@ class ModelBuilder:
             print(f"[ModelBuilder] Zone {z}: {len(sub)} records")
             if len(sub) < 20:
                 print(
-                    f"[ModelBuilder] Zone {z}: Skipped (insufficient data: {len(sub)} < 20)"
+                    f"[ModelBuilder] Zone {z}: Skipped "
+                    f"(insufficient data: {len(sub)} < 20)"
                 )
                 continue
+            # 利用可能な特徴量に自動絞り込み
+            feats = [c for c in base_feats if c in sub.columns]
+            if len(feats) < 5:
+                print(f"[ModelBuilder] Zone {z}: insufficient features {feats}")
             # 温度
             X_t, y_t = self._split_xy(sub, "Indoor Temp.", feats)
             Xtr, Xte, ytr, yte = train_test_split(
@@ -87,32 +100,62 @@ class ModelBuilder:
                 continue
             power_count = sub["adjusted_power"].notna().sum()
             print(
-                f"[ModelBuilder] Zone {z}: adjusted_power non-null values: {power_count}"
+                f"[ModelBuilder] Zone {z}: adjusted_power non-null values: "
+                f"{power_count}"
             )
             if power_count < 10:
                 print(
-                    f"[ModelBuilder] Zone {z}: Skipped (insufficient power data: {power_count} < 10)"
+                    f"[ModelBuilder] Zone {z}: Skipped "
+                    f"(insufficient power data: {power_count} < 10)"
                 )
                 continue
             X_p, y_p = self._split_xy(sub, "adjusted_power", feats)
-            Xtrp, Xtep, ytrp, ytep = train_test_split(
-                X_p, y_p, test_size=0.2, random_state=42
-            )
+            # サンプル重み: 非稼働(OFF)データの影響を抑える（ON=1.0, OFF=0.2）
+            sample_weight_series = None
+            if "A/C ON/OFF" in sub.columns:
+                try:
+                    onoff_aligned = sub.loc[X_p.index, "A/C ON/OFF"].fillna(0)
+                    sample_weight_series = pd.Series(
+                        np.where(onoff_aligned > 0, 1.0, 0.2), index=X_p.index
+                    )
+                except Exception:
+                    sample_weight_series = None
+
+            if sample_weight_series is not None:
+                Xtrp, Xtep, ytrp, ytep, wtrp, wtep = train_test_split(
+                    X_p, y_p, sample_weight_series, test_size=0.2, random_state=42
+                )
+            else:
+                Xtrp, Xtep, ytrp, ytep = train_test_split(
+                    X_p, y_p, test_size=0.2, random_state=42
+                )
+                wtrp = None
+
             power_model = RandomForestRegressor(n_estimators=200, random_state=42)
-            power_model.fit(Xtrp, ytrp)
+            if wtrp is not None:
+                power_model.fit(Xtrp, ytrp, sample_weight=wtrp)
+            else:
+                power_model.fit(Xtrp, ytrp)
+
+            # マルチアウトプットモデル（一時的に無効化）
+            multi_output_model = None
+
             # ざっくり評価
             y_hat_t = temp_model.predict(Xte)
             print(
-                f"[Model] {z} Temp: MAE={mean_absolute_error(yte, y_hat_t):.2f} R2={r2_score(yte, y_hat_t):.3f}"
+                f"[Model] {z} Temp: MAE={mean_absolute_error(yte, y_hat_t):.2f} "
+                f"R2={r2_score(yte, y_hat_t):.3f}"
             )
             y_hat_p = power_model.predict(Xtep)
             print(
-                f"[Model] {z} Power: MAE={mean_absolute_error(ytep, y_hat_p):.1f} R2={r2_score(ytep, y_hat_p):.3f}"
+                f"[Model] {z} Power: MAE={mean_absolute_error(ytep, y_hat_p):.1f} "
+                f"R2={r2_score(ytep, y_hat_p):.3f}"
             )
             models[z] = EnvPowerModels(
                 temp_model=temp_model,
                 hum_model=hum_model,
                 power_model=power_model,
+                multi_output_model=multi_output_model,
                 feature_cols=feats,
             )
         # 保存
@@ -126,6 +169,7 @@ class ModelBuilder:
                     "temp_model": pack.temp_model,
                     "hum_model": pack.hum_model,
                     "power_model": pack.power_model,
+                    "multi_output_model": pack.multi_output_model,
                     "feature_cols": pack.feature_cols,
                 },
                 os.path.join(mdir, f"models_{z}.pkl"),

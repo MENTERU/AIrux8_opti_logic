@@ -28,21 +28,15 @@ def optimize_zone_period(
     power_w: float,
 ) -> Tuple[str, Dict[pd.Timestamp, dict]]:
     """
-    単一ゾーンの期間最適化を実行（並列処理用）
+    時刻別の意思決定を許容しつつ、期間全体スコア（電力合計＋快適性ペナルティ）を最小化。
+    シンプルなビームサーチ（貪欲拡張＋幅優先N件保持）で探索量を制御。
 
-    Args:
-        zone_name: ゾーン名
-        zone_data: ゾーンの設定データ
-        models: 予測モデル
-        date_range: 最適化対象の時間範囲
-        weather_df: 天候データ
-        comfort_w: 快適性重み
-        power_w: 電力重み
-
-    Returns:
-        (ゾーン名, 最適化結果)
+    戻り値: (ゾーン名, スケジュール辞書)
     """
     print(f"[PeriodOptimizer] Starting period optimization for zone: {zone_name}")
+
+    # パラメータ
+    beam_width = 5  # 時刻ごとに保持する候補数（高速化のため削減）
 
     # ゾーン設定の取得
     start_h = int(str(zone_data.get("start_time", "07:00")).split(":")[0])
@@ -72,126 +66,161 @@ def optimize_zone_period(
             fan_list.append(int(fan))
 
     print(
-        f"[PeriodOptimizer] Zone {zone_name}: {len(sp_list)}×{len(mode_list)}×{len(fan_list)} = {len(sp_list) * len(mode_list) * len(fan_list)} combinations"
+        f"[PeriodOptimizer] Zone {zone_name}: Beam search with width={beam_width}, "
+        f"candidates={len(sp_list)}×{len(mode_list)}×{len(fan_list)}"
     )
 
     # 天候データの準備
     weather_dict = {}
     for _, row in weather_df.iterrows():
         weather_dict[row["datetime"]] = {
-            "outdoor_temp": row["Outdoor Temp."],
-            "outdoor_humidity": row["Outdoor Humidity"],
+            "outdoor_temp": (
+                row["Outdoor Temp."]
+                if "Outdoor Temp." in row
+                else row.get("Outdoor Temp.", np.nan)
+            ),
+            "outdoor_humidity": (
+                row["Outdoor Humidity"]
+                if "Outdoor Humidity" in row
+                else row.get("Outdoor Humidity", np.nan)
+            ),
             "solar_radiation": row.get("Solar Radiation", 0),
         }
 
-    # 期間最適化の実行
-    best_schedule = None
-    best_score = np.inf
+    # 初期ビーム（直前温度=目標温度、累積スコア=0）
+    initial_temp = float(zone_data.get("target_room_temp", 25.0))
+    BeamState = dict  # 型エイリアス
+    beam: List[BeamState] = [
+        {
+            "last_temp": initial_temp,
+            "total_power": 0.0,
+            "comfort_penalty": 0.0,
+            "schedule": {},
+        }
+    ]
 
-    # 全組み合わせを評価
-    total_combinations = len(sp_list) * len(mode_list) * len(fan_list)
-    print(
-        f"[PeriodOptimizer] Zone {zone_name}: Evaluating {total_combinations} combinations for entire period"
+    # 時間特徴の事前計算
+    time_features = {
+        ts: {
+            "DayOfWeek": int(ts.dayofweek),
+            "Hour": int(ts.hour),
+            "Month": int(ts.month),
+            "IsWeekend": 1 if int(ts.dayofweek) in (5, 6) else 0,
+            "IsHoliday": 0,  # 期間最適化中は休日情報未連携のため0で初期化
+        }
+        for ts in date_range
+    }
+
+    # 時系列に沿って拡張
+    for timestamp in date_range:
+        is_biz = start_h <= timestamp.hour <= end_h
+
+        expanded: List[BeamState] = []
+        for state in beam:
+            last_temp = float(state["last_temp"])
+            total_power = float(state["total_power"])
+            comfort_penalty = float(state["comfort_penalty"])
+            schedule = state["schedule"]
+
+            weather = weather_dict.get(
+                timestamp,
+                {
+                    "outdoor_temp": 25.0,
+                    "outdoor_humidity": 60.0,
+                    "solar_radiation": 0,
+                },
+            )
+
+            for sp in sp_list:
+                for md in mode_list:
+                    for fs in fan_list:
+                        # 特徴量の作成
+                        features = pd.DataFrame(
+                            [
+                                {
+                                    "A/C Set Temperature": sp,
+                                    "Indoor Temp. Lag1": last_temp,
+                                    "A/C ON/OFF": 1 if is_biz else 0,
+                                    "A/C Mode": md,
+                                    "A/C Fan Speed": fs,
+                                    "Outdoor Temp.": weather["outdoor_temp"],
+                                    "Outdoor Humidity": weather["outdoor_humidity"],
+                                    "Solar Radiation": weather["solar_radiation"],
+                                    "DayOfWeek": time_features[timestamp]["DayOfWeek"],
+                                    "Hour": time_features[timestamp]["Hour"],
+                                    "Month": time_features[timestamp]["Month"],
+                                    "IsWeekend": time_features[timestamp]["IsWeekend"],
+                                    "IsHoliday": time_features[timestamp]["IsHoliday"],
+                                }
+                            ]
+                        )[models.feature_cols]
+
+                        # 電力予測の条件を学習時と統一（ON/OFF状態に基づく）
+                        power_prediction_onoff = 1 if is_biz else 0
+
+                        # 予測（マルチアウトプットモデルが利用可能な場合は使用）
+                        if models.multi_output_model is not None:
+                            multi_pred = models.multi_output_model.predict(features)
+                            temp_pred = float(multi_pred[0][0])
+                            power_pred = float(multi_pred[0][1]) * unit_count
+                        else:
+                            temp_pred = float(models.temp_model.predict(features)[0])
+                            # 電力予測：ON/OFF状態に基づいて調整
+                            base_power_pred = float(
+                                models.power_model.predict(features)[0]
+                            )
+                            # OFF状態の場合は電力予測を0に近づける
+                            if power_prediction_onoff == 0:
+                                power_pred = base_power_pred * 0.1  # OFF時は10%に減衰
+                            else:
+                                power_pred = base_power_pred * unit_count
+
+                        # ペナルティ更新（執務時間内のみ）
+                        new_penalty = comfort_penalty
+                        if is_biz:
+                            if temp_pred < comfort_min:
+                                new_penalty += (comfort_min - temp_pred) * 100
+                            elif temp_pred > comfort_max:
+                                new_penalty += (temp_pred - comfort_max) * 100
+
+                        # 新状態の作成
+                        new_schedule = dict(schedule)
+                        new_schedule[timestamp] = {
+                            "set_temp": sp,
+                            "mode": md,
+                            "fan": fs,
+                            "pred_temp": temp_pred,
+                            "pred_power": power_pred,
+                        }
+
+                        new_state = {
+                            "last_temp": temp_pred,
+                            "total_power": total_power + power_pred,
+                            "comfort_penalty": new_penalty,
+                            "schedule": new_schedule,
+                        }
+
+                        expanded.append(new_state)
+
+        # ビーム幅で剪定（現在までの累積スコアで評価）
+        expanded.sort(
+            key=lambda s: comfort_w * s["comfort_penalty"] + power_w * s["total_power"]
+        )
+        beam = expanded[:beam_width]
+
+    # 最良解の選択
+    best_state = min(
+        beam,
+        key=lambda s: comfort_w * s["comfort_penalty"] + power_w * s["total_power"],
     )
 
-    for sp in sp_list:
-        for md in mode_list:
-            for fs in fan_list:
-                # 期間全体のスケジュールを生成
-                schedule = {}
-                pred_temps = []
-                pred_powers = []
-                last_temp = float(zone_data.get("target_room_temp", 25.0))
-
-                for timestamp in date_range:
-                    is_biz = start_h <= timestamp.hour <= end_h
-
-                    # 天候データの取得
-                    weather = weather_dict.get(
-                        timestamp,
-                        {
-                            "outdoor_temp": 25.0,
-                            "outdoor_humidity": 60.0,
-                            "solar_radiation": 0,
-                        },
-                    )
-
-                    # 特徴量の作成
-                    features = pd.DataFrame(
-                        [
-                            {
-                                "A/C Set Temperature": sp,
-                                "Indoor Temp. Lag1": last_temp,
-                                "A/C ON/OFF": 1 if is_biz else 0,
-                                "A/C Mode": md,
-                                "A/C Fan Speed": fs,
-                                "Outdoor Temp.": weather["outdoor_temp"],
-                                "Outdoor Humidity": weather["outdoor_humidity"],
-                                "Solar Radiation": weather["solar_radiation"],
-                            }
-                        ]
-                    )[models.feature_cols]
-
-                    # 予測
-                    temp_pred = float(models.temp_model.predict(features)[0])
-                    power_pred = (
-                        float(models.power_model.predict(features)[0]) * unit_count
-                    )
-
-                    # スケジュールに追加
-                    schedule[timestamp] = {
-                        "set_temp": sp,
-                        "mode": md,
-                        "fan": fs,
-                        "pred_temp": temp_pred,
-                        "pred_power": power_pred,
-                    }
-
-                    pred_temps.append(temp_pred)
-                    pred_powers.append(power_pred)
-                    last_temp = temp_pred
-
-                # 期間全体での評価
-                # 1. 電力合計
-                total_power = sum(pred_powers)
-
-                # 2. 室温平均（執務時間内のみ）
-                business_hours_temps = []
-                for i, timestamp in enumerate(date_range):
-                    if start_h <= timestamp.hour <= end_h:
-                        business_hours_temps.append(pred_temps[i])
-
-                avg_temp = (
-                    np.mean(business_hours_temps)
-                    if business_hours_temps
-                    else np.mean(pred_temps)
-                )
-
-                # 3. 快適性ペナルティ（執務時間内のみ）
-                comfort_penalty = 0
-                for temp in business_hours_temps:
-                    if temp < comfort_min:
-                        comfort_penalty += (comfort_min - temp) * 100
-                    elif temp > comfort_max:
-                        comfort_penalty += (temp - comfort_max) * 100
-
-                # 4. 総合スコア
-                period_score = comfort_w * comfort_penalty + power_w * total_power
-
-                # 最適解の更新
-                if period_score < best_score:
-                    best_score = period_score
-                    best_schedule = schedule
-
-                    print(
-                        f"[PeriodOptimizer] Zone {zone_name}: New best score = {period_score:.1f} "
-                        f"(Power: {total_power:.0f}W, Avg Temp: {avg_temp:.1f}°C, Penalty: {comfort_penalty:.1f})"
-                    )
-
+    best_score = (
+        comfort_w * best_state["comfort_penalty"] + power_w * best_state["total_power"]
+    )
     print(
         f"[PeriodOptimizer] Zone {zone_name} completed - Best score: {best_score:.1f}"
     )
-    return zone_name, best_schedule
+    return zone_name, best_state["schedule"]
 
 
 class PeriodOptimizer:
@@ -265,7 +294,8 @@ class PeriodOptimizer:
                     results[zone_name] = zone_schedule
                     completed_count += 1
                     print(
-                        f"[PeriodOptimizer] Completed {completed_count}/{len(zone_tasks)} zones: {zone_name}"
+                        f"[PeriodOptimizer] Completed {completed_count}/"
+                        f"{len(zone_tasks)} zones: {zone_name}"
                     )
                 except Exception as exc:
                     print(
@@ -274,7 +304,8 @@ class PeriodOptimizer:
 
         end_time = time.perf_counter()
         print(
-            f"[PeriodOptimizer] Period optimization completed in {end_time - start_time:.2f} seconds"
+            f"[PeriodOptimizer] Period optimization completed in "
+            f"{end_time - start_time:.2f} seconds"
         )
         print(f"[PeriodOptimizer] Optimized {len(results)} zones")
 
