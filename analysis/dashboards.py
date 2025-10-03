@@ -13,6 +13,55 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from processing.utilities.category_mapping_loader import (
+    get_category_mapping,
+    get_inverse_category_mapping,
+    get_normalized_category_mapping,
+)
+
+
+MODE_LABEL_TO_CODE = get_category_mapping("A/C Mode")
+MODE_CODE_TO_LABEL = get_inverse_category_mapping("A/C Mode")
+MODE_NORMALIZED_LABEL_TO_CODE = get_normalized_category_mapping("A/C Mode")
+FALLBACK_MODE_CODE = (
+    MODE_LABEL_TO_CODE.get("FAN")
+    if "FAN" in MODE_LABEL_TO_CODE
+    else next(iter(MODE_LABEL_TO_CODE.values()))
+)
+
+FAN_LABEL_TO_CODE = get_category_mapping("A/C Fan Speed")
+FAN_CODE_TO_LABEL = get_inverse_category_mapping("A/C Fan Speed")
+FAN_NORMALIZED_LABEL_TO_CODE = get_normalized_category_mapping("A/C Fan Speed")
+FALLBACK_FAN_CODE = (
+    FAN_LABEL_TO_CODE.get("Low")
+    if "Low" in FAN_LABEL_TO_CODE
+    else next(iter(FAN_LABEL_TO_CODE.values()))
+)
+
+
+def _to_mode_code(value) -> int:
+    if pd.isna(value):
+        return FALLBACK_MODE_CODE
+    try:
+        numeric_value = int(value)
+    except (TypeError, ValueError):
+        normalized = str(value).strip().upper()
+        return MODE_NORMALIZED_LABEL_TO_CODE.get(normalized, FALLBACK_MODE_CODE)
+    else:
+        return numeric_value if numeric_value in MODE_CODE_TO_LABEL else FALLBACK_MODE_CODE
+
+
+def _to_fan_code(value) -> int:
+    if pd.isna(value):
+        return FALLBACK_FAN_CODE
+    try:
+        numeric_value = int(value)
+    except (TypeError, ValueError):
+        normalized = str(value).strip().upper()
+        return FAN_NORMALIZED_LABEL_TO_CODE.get(normalized, FALLBACK_FAN_CODE)
+    else:
+        return numeric_value if numeric_value in FAN_CODE_TO_LABEL else FALLBACK_FAN_CODE
+
 
 def _load_actual(store_name: str) -> Optional[pd.DataFrame]:
     path = f"data/02_PreprocessedData/{store_name}/features_processed_{store_name}.csv"
@@ -370,8 +419,7 @@ def create_plan_validation_dashboard(
         # 運転モード・ファン（実績/計画）
         if not sub_a.empty and "A/C Mode" in sub_a.columns:
             # モード数値を文字列に変換
-            mode_mapping = {0: "COOL", 1: "DEHUM", 2: "FAN", 3: "HEAT"}
-            mode_labels = sub_a["A/C Mode"].map(mode_mapping).fillna("UNKNOWN")
+            mode_labels = sub_a["A/C Mode"].map(MODE_CODE_TO_LABEL).fillna("UNKNOWN")
 
             fig.add_trace(
                 go.Scatter(
@@ -388,9 +436,12 @@ def create_plan_validation_dashboard(
             )
         if cols["mode"] in sub_p.columns:
             # 計画のモードも文字列に変換
-            plan_mode_mapping = {"COOL": 0, "DEHUM": 1, "FAN": 2, "HEAT": 3}
-            plan_mode_numeric = sub_p[cols["mode"]].map(plan_mode_mapping).fillna(2)
-            plan_mode_labels = sub_p[cols["mode"]]
+            plan_mode_numeric = (
+                sub_p[cols["mode"]].map(_to_mode_code).astype(int)
+            )
+            plan_mode_labels = (
+                plan_mode_numeric.map(MODE_CODE_TO_LABEL).fillna("UNKNOWN")
+            )
 
             fig.add_trace(
                 go.Scatter(
@@ -407,8 +458,7 @@ def create_plan_validation_dashboard(
             )
         if not sub_a.empty and "A/C Fan Speed" in sub_a.columns:
             # ファン速度数値を文字列に変換
-            fan_mapping = {0: "Auto", 1: "Low", 2: "Medium", 3: "High", 4: "Top"}
-            fan_labels = sub_a["A/C Fan Speed"].map(fan_mapping).fillna("UNKNOWN")
+            fan_labels = sub_a["A/C Fan Speed"].map(FAN_CODE_TO_LABEL).fillna("UNKNOWN")
 
             fig.add_trace(
                 go.Scatter(
@@ -425,9 +475,12 @@ def create_plan_validation_dashboard(
             )
         if cols["fan"] in sub_p.columns:
             # 計画のファン速度も数値に変換
-            plan_fan_numeric = sub_p[cols["fan"]]
-            plan_fan_mapping = {0: "Auto", 1: "Low", 2: "Medium", 3: "High", 4: "Top"}
-            plan_fan_labels = plan_fan_numeric.map(plan_fan_mapping).fillna("UNKNOWN")
+            plan_fan_numeric = (
+                sub_p[cols["fan"]].map(_to_fan_code).astype(int)
+            )
+            plan_fan_labels = (
+                plan_fan_numeric.map(FAN_CODE_TO_LABEL).fillna("UNKNOWN")
+            )
 
             fig.add_trace(
                 go.Scatter(

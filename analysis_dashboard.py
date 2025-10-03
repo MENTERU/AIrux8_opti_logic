@@ -18,6 +18,11 @@ import seaborn as sns
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from processing.utilities.category_mapping_loader import get_inverse_category_mapping
+
+MODE_CODE_TO_LABEL = get_inverse_category_mapping("A/C Mode")
+FAN_CODE_TO_LABEL = get_inverse_category_mapping("A/C Fan Speed")
+
 # ページ設定
 st.set_page_config(
     page_title="HVAC分析ダッシュボード",
@@ -161,6 +166,13 @@ def create_ac_status_analysis(df, zone, start_date, end_date, freq):
             f"{zone} - 室温・電力",
         ],
         vertical_spacing=0.08,
+        specs=[
+            [{"secondary_y": False}],
+            [{"secondary_y": False}],
+            [{"secondary_y": False}],
+            [{"secondary_y": False}],
+            [{"secondary_y": True}],  # Row 5 needs secondary_y for power
+        ],
     )
 
     # 1. A/C ON/OFF状態
@@ -244,7 +256,6 @@ def create_ac_status_analysis(df, zone, start_date, end_date, freq):
             line=dict(color=DEFAULT_COLORS[5], width=3),
             mode="lines+markers",
             marker=dict(size=6),
-            yaxis="y2",
         ),
         row=5,
         col=1,
@@ -391,8 +402,9 @@ def create_mode_analysis(df, zone, freq):
     zone_data = resample_data(zone_data, freq)
 
     # モード名マッピング
-    mode_mapping = {0: "OFF", 1: "COOL", 2: "HEAT", 3: "FAN"}
-    zone_data["Mode_Name"] = zone_data["A/C Mode"].map(mode_mapping)
+    zone_data["Mode_Name"] = (
+        zone_data["A/C Mode"].map(MODE_CODE_TO_LABEL).fillna("UNKNOWN")
+    )
 
     # モード別統計
     mode_stats = (

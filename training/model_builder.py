@@ -19,8 +19,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
 from xgboost import XGBRegressor
 
+from config.config_train import BASE_FEATURES, POWER_FEATURE_COLS, TEMP_FEATURE_COLS
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+from optimization.helper_functions import print_model_evaluation_table
 
 
 # =============================
@@ -136,24 +140,6 @@ class ModelBuilder:
             print("[ModelBuilder] Area data is None or empty")
             return {}
         models: Dict[str, EnvPowerModels] = {}
-        base_feats = [
-            "A/C Set Temperature",
-            "Indoor Temp. Lag1",
-            "A/C ON/OFF",
-            "A/C Mode",
-            "A/C Fan Speed",
-            "Outdoor Temp.",
-            "Outdoor Humidity",
-            "Solar Radiation",
-            "DayOfWeek",
-            "Hour",
-            "Month",
-            "IsWeekend",
-            "IsHoliday",
-            # 追加特徴量（存在すれば使う）
-            "HourOfWeek",
-            "OnRunLength",
-        ]
         zones = sorted(area_df["zone"].dropna().unique().tolist())
         print(f"[ModelBuilder] Found zones: {zones}")
         for z in zones:
@@ -166,14 +152,33 @@ class ModelBuilder:
                     f"[ModelBuilder] Zone {z}: Skipped (insufficient data: {len(sub)} < 20)"
                 )
                 continue
-            feats = [c for c in base_feats if c in sub.columns]
-            if feats:
-                nonnull_ratio = sub[feats].notna().mean()
-                feats = [c for c in feats if nonnull_ratio.get(c, 0.0) >= 0.9]
-            if len(feats) < 5:
-                print(f"[ModelBuilder] Zone {z}: insufficient features {feats}")
+
+            # Temperature and humidity models use TEMP_FEATURE_COLS
+            temp_feats = [c for c in TEMP_FEATURE_COLS if c in sub.columns]
+            if temp_feats:
+                nonnull_ratio = sub[temp_feats].notna().mean()
+                # Keep important features even if they have some missing values (>= 30% non-null)
+                # Critical features like A/C Fan Speed should always be included
+                critical_features = [
+                    "A/C Fan Speed",
+                    "A/C Status",  # Combined ON/OFF and Mode
+                    # "A/C Mode",  # Now using A/C Status
+                    # "A/C ON/OFF",  # Now using A/C Status
+                    "A/C Set Temperature",
+                ]
+                temp_feats = [
+                    c
+                    for c in temp_feats
+                    if (c in critical_features and nonnull_ratio.get(c, 0.0) >= 0.3)
+                    or nonnull_ratio.get(c, 0.0) >= 0.9
+                ]
+            if len(temp_feats) < 5:
+                print(
+                    f"[ModelBuilder] Zone {z}: insufficient temp features {temp_feats}"
+                )
+
             # 温度
-            X_t, y_t = self._split_xy(sub, "Indoor Temp.", feats)
+            X_t, y_t = self._split_xy(sub, "Indoor Temp.", temp_feats)
             if len(X_t) < 5:
                 print(
                     f"[ModelBuilder] Zone {z}: Skipped (insufficient temp samples after dropping NaNs: {len(X_t)} < 5)"
@@ -203,7 +208,7 @@ class ModelBuilder:
             # 湿度
             hum_model = None
             if "室内湿度" in sub.columns and sub["室内湿度"].notna().sum() > 10:
-                X_h, y_h = self._split_xy(sub, "室内湿度", feats)
+                X_h, y_h = self._split_xy(sub, "室内湿度", temp_feats)
                 Xtrh, Xteh, ytrh, yteh = train_test_split(
                     X_h, y_h, test_size=0.2, random_state=42
                 )
@@ -241,12 +246,54 @@ class ModelBuilder:
                     f"[ModelBuilder] Zone {z}: Skipped (insufficient power data: {power_count} < 10)"
                 )
                 continue
-            X_p, y_p = self._split_xy(sub, "adjusted_power", feats)
+            # Power model uses POWER_FEATURE_COLS
+            power_feats = [c for c in POWER_FEATURE_COLS if c in sub.columns]
+            print(
+                f"[ModelBuilder] Zone {z}: Initial power features count: {len(power_feats)}"
+            )
+            if power_feats:
+                nonnull_ratio = sub[power_feats].notna().mean()
+                # Keep important features even if they have some missing values (>= 30% non-null)
+                # Critical features like A/C Fan Speed should always be included
+                critical_features = [
+                    "A/C Fan Speed",
+                    "A/C Status",  # Combined ON/OFF and Mode
+                    # "A/C Mode",  # Now using A/C Status
+                    # "A/C ON/OFF",  # Now using A/C Status
+                    "A/C Set Temperature",
+                ]
+                power_feats = [
+                    c
+                    for c in power_feats
+                    if (c in critical_features and nonnull_ratio.get(c, 0.0) >= 0.3)
+                    or nonnull_ratio.get(c, 0.0) >= 0.9
+                ]
+            print(
+                f"[ModelBuilder] Zone {z}: Final power features count: {len(power_feats)}"
+            )
+            print(
+                f"[ModelBuilder] Zone {z}: Power features (first 10): {power_feats[:min(10, len(power_feats))]}"
+            )
+            if len(power_feats) < 5:
+                print(
+                    f"[ModelBuilder] Zone {z}: insufficient power features {power_feats}"
+                )
+
+            X_p, y_p = self._split_xy(sub, "adjusted_power", power_feats)
             if len(X_p) < 5:
                 print(
                     f"[ModelBuilder] Zone {z}: Skipped (insufficient power samples after dropping NaNs: {len(X_p)} < 5)"
                 )
                 continue
+
+            # Debug: Print target statistics
+            print(f"[ModelBuilder] Zone {z}: Power target (y_p) statistics:")
+            print(f"  - Min: {y_p.min():.2f} W")
+            print(f"  - Max: {y_p.max():.2f} W")
+            print(f"  - Mean: {y_p.mean():.2f} W")
+            print(f"  - Std: {y_p.std():.2f} W")
+            print(f"  - Shape: {y_p.shape}")
+
             sample_weight_series = None
             if "A/C ON/OFF" in sub.columns:
                 try:
@@ -265,56 +312,51 @@ class ModelBuilder:
                     X_p, y_p, test_size=0.2, random_state=42
                 )
                 wtrp = None
-            power_base = Pipeline(
-                steps=[
-                    ("scaler", MinMaxScaler()),
-                    (
-                        "model",
-                        XGBRegressor(
-                            n_estimators=600,
+            # Remove MinMaxScaler - it's causing constant predictions
+            power_model = XGBRegressor(
+                n_estimators=600,
+                max_depth=6,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.9,
+                random_state=42,
+                n_jobs=-1,
+                objective="reg:squarederror",  # Changed to squarederror for better stability
+            )
+
+            if wtrp is not None:
+                power_model.fit(Xtrp, ytrp, sample_weight=wtrp)
+            else:
+                power_model.fit(Xtrp, ytrp)
+
+            # Debug: Check predictions on training set
+            train_pred = power_model.predict(Xtrp)
+            print(f"[ModelBuilder] Zone {z}: Training predictions:")
+            print(f"  - Min: {train_pred.min():.2f} W")
+            print(f"  - Max: {train_pred.max():.2f} W")
+            print(f"  - Mean: {train_pred.mean():.2f} W")
+            print(f"  - Training targets min/max: {ytrp.min():.2f}/{ytrp.max():.2f} W")
+
+            # マルチ出力
+            multi_output_model = None
+            try:
+                multi_targets = ["Indoor Temp.", "adjusted_power"]
+                if all(t in sub.columns for t in multi_targets):
+                    Xm, Ym = self._split_multi(sub, multi_targets, temp_feats)
+                    if len(Xm) >= 20:
+                        Xm_tr, Xm_te, Ym_tr, Ym_te = train_test_split(
+                            Xm, Ym, test_size=0.2, random_state=42
+                        )
+                        # Remove MinMaxScaler - XGBoost handles features internally
+                        base_xgb = XGBRegressor(
+                            n_estimators=500,
                             max_depth=6,
                             learning_rate=0.05,
                             subsample=0.8,
                             colsample_bytree=0.9,
                             random_state=42,
                             n_jobs=-1,
-                            objective="reg:pseudohubererror",
-                        ),
-                    ),
-                ]
-            )
-            power_model = PowerLogModel(power_base)
-            if wtrp is not None:
-                power_model.fit(Xtrp, ytrp, sample_weight=wtrp)
-            else:
-                power_model.fit(Xtrp, ytrp)
-            # マルチ出力
-            multi_output_model = None
-            try:
-                multi_targets = ["Indoor Temp.", "adjusted_power"]
-                if all(t in sub.columns for t in multi_targets):
-                    Xm, Ym = self._split_multi(sub, multi_targets, feats)
-                    if len(Xm) >= 20:
-                        Xm_tr, Xm_te, Ym_tr, Ym_te = train_test_split(
-                            Xm, Ym, test_size=0.2, random_state=42
-                        )
-                        base_xgb = Pipeline(
-                            steps=[
-                                ("scaler", MinMaxScaler()),
-                                (
-                                    "model",
-                                    XGBRegressor(
-                                        n_estimators=500,
-                                        max_depth=6,
-                                        learning_rate=0.05,
-                                        subsample=0.8,
-                                        colsample_bytree=0.9,
-                                        random_state=42,
-                                        n_jobs=-1,
-                                        objective="reg:pseudohubererror",
-                                    ),
-                                ),
-                            ]
+                            objective="reg:squarederror",  # Changed to squarederror for better stability
                         )
                         multi_output_model = MultiOutputRegressor(base_xgb)
                         multi_output_model.fit(Xm_tr, Ym_tr)
@@ -348,18 +390,35 @@ class ModelBuilder:
                         power_r2 = r2_score(
                             Ym_te["adjusted_power"], Ym_hat["adjusted_power"]
                         )
+                        # Print multi-output model evaluation in table format
+                        print(f"\n{'='*60}")
+                        print(f"📊 Multi-Output Model Evaluation - {z}")
+                        print(f"{'='*60}")
+                        print(f"{'Metric':<15} | {'Temperature':<15} | {'Power':<15}")
+                        print(f"{'-'*15}-+-{'-'*15}-+-{'-'*15}")
                         print(
-                            f"[Model] {z} Multi-Output (Temp/Power): Temp MAE={temp_mae:.2f} MAPE={temp_mape*100:.1f}% R2={temp_r2:.3f} | Power MAE(kW)={power_mae:.3f} MAPE={(power_mape*100 if not np.isnan(power_mape) else np.nan):.1f}% R2={power_r2:.3f}"
+                            f"{'MAE':<15} | {temp_mae:<15.2f} | {power_mae:<15.3f} kW"
                         )
+                        print(
+                            f"{'MAPE':<15} | {temp_mape*100:<15.1f}% | {(power_mape*100 if not np.isnan(power_mape) else np.nan):<15.1f}%"
+                        )
+                        print(f"{'R2':<15} | {temp_r2:<15.3f} | {power_r2:<15.3f}")
+                        print(f"{'='*60}")
             except Exception as me:
                 print(f"[ModelBuilder] Multi-output model error for zone {z}: {me}")
             # 評価
             y_hat_t = temp_model.predict(Xte)
             temp_mae = mean_absolute_error(yte, y_hat_t)
             temp_mape = mean_absolute_percentage_error(yte, y_hat_t)
-            print(
-                f"[Model] {z} Temp: MAE={temp_mae:.2f} MAPE={temp_mape*100:.1f}% R2={r2_score(yte, y_hat_t):.3f}"
-            )
+
+            # Calculate temperature metrics
+            temp_metrics = {
+                "MAE": temp_mae,
+                "MAPE": temp_mape * 100,
+                "R2": r2_score(yte, y_hat_t),
+            }
+
+            # Calculate power metrics
             y_hat_p = power_model.predict(Xtep)
             ytep_kw = ytep / 1000.0
             yhat_kw = pd.Series(y_hat_p, index=ytep.index) / 1000.0
@@ -371,9 +430,14 @@ class ModelBuilder:
                 if nonzero_mask_p.any()
                 else np.nan
             )
-            print(
-                f"[Model] {z} Power: MAE(kW)={mean_absolute_error(ytep_kw, yhat_kw):.3f} MAPE={(power_mape*100 if not np.isnan(power_mape) else np.nan):.1f}% R2={r2_score(ytep, y_hat_p):.3f}"
-            )
+            power_metrics = {
+                "MAE": mean_absolute_error(ytep_kw, yhat_kw),
+                "MAPE": power_mape * 100 if not np.isnan(power_mape) else np.nan,
+                "R2": r2_score(ytep, y_hat_p),
+            }
+
+            # Print combined model evaluation table
+            print_model_evaluation_table(z, temp_metrics, power_metrics)
             # SHAP
             out_dir = os.path.join("analysis", "output", self.store_name, z)
             ModelBuilder._ensure_dir(out_dir)
@@ -404,7 +468,7 @@ class ModelBuilder:
                 hum_model=hum_model,
                 power_model=power_model,
                 multi_output_model=multi_output_model,
-                feature_cols=feats,
+                feature_cols=temp_feats,  # Use temp_feats for compatibility
             )
         # 保存
         from config.utils import get_data_path
@@ -422,7 +486,100 @@ class ModelBuilder:
                 },
                 os.path.join(mdir, f"models_{z}.pkl"),
             )
+
+        # Save validation results with input features and predictions
+        self._save_validation_results(area_df, models)
+
         return models
+
+    def _save_validation_results(self, area_df: pd.DataFrame, models: Dict[str, Any]):
+        """
+        Save input features and predictions to valid_results.csv for each area
+
+        Args:
+            area_df: Area data with features
+            models: Trained models for each zone
+        """
+        from config.utils import get_data_path
+
+        # Create output directory
+        output_dir = os.path.join(get_data_path("valid_results_path"), self.store_name)
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get all zones
+        zones = sorted(area_df["zone"].dropna().unique().tolist())
+
+        for zone in zones:
+            print(f"[ModelBuilder] Saving validation results for zone: {zone}")
+
+            # Get zone data
+            zone_data = area_df[area_df["zone"] == zone].copy()
+
+            if zone not in models:
+                print(f"[ModelBuilder] No model found for zone {zone}, skipping...")
+                continue
+
+            model_pack = models[zone]
+
+            # Prepare features for prediction
+            temp_feats = [c for c in TEMP_FEATURE_COLS if c in zone_data.columns]
+            power_feats = [c for c in POWER_FEATURE_COLS if c in zone_data.columns]
+
+            # Create results dataframe starting with input features
+            results_df = zone_data.copy()
+
+            # Add temperature predictions
+            if model_pack.temp_model is not None and len(temp_feats) > 0:
+                try:
+                    # Filter features and handle missing values
+                    X_temp = zone_data[temp_feats].fillna(0)
+                    temp_pred = model_pack.temp_model.predict(X_temp)
+                    results_df[f"{zone}_temp_pred"] = temp_pred
+                    print(f"[ModelBuilder] Added temperature predictions for {zone}")
+                except Exception as e:
+                    print(
+                        f"[ModelBuilder] Temperature prediction failed for {zone}: {e}"
+                    )
+                    results_df[f"{zone}_temp_pred"] = np.nan
+
+            # Add power predictions
+            if model_pack.power_model is not None and len(power_feats) > 0:
+                try:
+                    # Filter features and handle missing values
+                    X_power = zone_data[power_feats].fillna(0)
+                    power_pred = model_pack.power_model.predict(X_power)
+
+                    # Clip negative predictions to 0 (power cannot be negative)
+                    power_pred = np.clip(power_pred, 0.0, None)
+
+                    # Debug: Print power prediction statistics
+                    print(f"[ModelBuilder] Power predictions for {zone}:")
+                    print(f"  - Min: {power_pred.min():.3f}")
+                    print(f"  - Max: {power_pred.max():.3f}")
+                    print(f"  - Mean: {power_pred.mean():.3f}")
+                    print(f"  - Std: {power_pred.std():.3f}")
+                    print(f"  - Unique values: {len(np.unique(power_pred))}")
+
+                    results_df[f"{zone}_power_pred"] = power_pred
+                    print(f"[ModelBuilder] Added power predictions for {zone}")
+                except Exception as e:
+                    print(f"[ModelBuilder] Power prediction failed for {zone}: {e}")
+                    results_df[f"{zone}_power_pred"] = np.nan
+
+            # Save to CSV with proper number formatting
+            output_file = os.path.join(output_dir, f"valid_results_{zone}.csv")
+
+            # Format power prediction columns to avoid scientific notation
+            for col in results_df.columns:
+                if col.endswith("_power_pred"):
+                    results_df[col] = results_df[col].round(
+                        3
+                    )  # Round to 3 decimal places
+
+            results_df.to_csv(output_file, index=False, float_format="%.3f")
+            print(f"[ModelBuilder] Saved validation results to: {output_file}")
+
+        print(f"[ModelBuilder] Validation results saved for {len(zones)} zones")
 
 
 class PowerLogModel:
@@ -462,22 +619,6 @@ class PowerLogModel:
             print("[ModelBuilder] Area data is None or empty")
             return {}
         models: Dict[str, EnvPowerModels] = {}
-        base_feats = [
-            "A/C Set Temperature",
-            "Indoor Temp. Lag1",
-            "A/C ON/OFF",
-            "A/C Mode",
-            "A/C Fan Speed",
-            "Outdoor Temp.",
-            "Outdoor Humidity",
-            "Solar Radiation",  # 日射量
-            # 時間特徴
-            "DayOfWeek",
-            "Hour",
-            "Month",
-            "IsWeekend",
-            "IsHoliday",
-        ]
         zones = sorted(area_df["zone"].dropna().unique().tolist())
         print(f"[ModelBuilder] Found zones: {zones}")
         for z in zones:
@@ -492,16 +633,33 @@ class PowerLogModel:
                     f"(insufficient data: {len(sub)} < 20)"
                 )
                 continue
-            # 利用可能な特徴量に自動絞り込み（欠損が多い列は除外）
-            feats = [c for c in base_feats if c in sub.columns]
-            if feats:
-                nonnull_ratio = sub[feats].notna().mean()
-                # 90%以上非欠損の列のみ使用
-                feats = [c for c in feats if nonnull_ratio.get(c, 0.0) >= 0.9]
-            if len(feats) < 5:
-                print(f"[ModelBuilder] Zone {z}: insufficient features {feats}")
+
+            # Temperature and humidity models use TEMP_FEATURE_COLS
+            temp_feats = [c for c in TEMP_FEATURE_COLS if c in sub.columns]
+            if temp_feats:
+                nonnull_ratio = sub[temp_feats].notna().mean()
+                # Keep important features even if they have some missing values (>= 30% non-null)
+                # Critical features like A/C Fan Speed should always be included
+                critical_features = [
+                    "A/C Fan Speed",
+                    "A/C Status",  # Combined ON/OFF and Mode
+                    # "A/C Mode",  # Now using A/C Status
+                    # "A/C ON/OFF",  # Now using A/C Status
+                    "A/C Set Temperature",
+                ]
+                temp_feats = [
+                    c
+                    for c in temp_feats
+                    if (c in critical_features and nonnull_ratio.get(c, 0.0) >= 0.3)
+                    or nonnull_ratio.get(c, 0.0) >= 0.9
+                ]
+            if len(temp_feats) < 5:
+                print(
+                    f"[ModelBuilder] Zone {z}: insufficient temp features {temp_feats}"
+                )
+
             # 温度
-            X_t, y_t = self._split_xy(sub, "Indoor Temp.", feats)
+            X_t, y_t = self._split_xy(sub, "Indoor Temp.", temp_feats)
             if len(X_t) < 5:
                 print(
                     f"[ModelBuilder] Zone {z}: Skipped (insufficient temp samples after dropping NaNs: {len(X_t)} < 5)"
@@ -531,7 +689,7 @@ class PowerLogModel:
             # 湿度（実績が無い場合はNone）
             hum_model = None
             if "室内湿度" in sub.columns and sub["室内湿度"].notna().sum() > 10:
-                X_h, y_h = self._split_xy(sub, "室内湿度", feats)
+                X_h, y_h = self._split_xy(sub, "室内湿度", temp_feats)
                 Xtrh, Xteh, ytrh, yteh = train_test_split(
                     X_h, y_h, test_size=0.2, random_state=42
                 )
@@ -571,7 +729,31 @@ class PowerLogModel:
                     f"(insufficient power data: {power_count} < 10)"
                 )
                 continue
-            X_p, y_p = self._split_xy(sub, "adjusted_power", feats)
+            # Power model uses POWER_FEATURE_COLS
+            power_feats = [c for c in POWER_FEATURE_COLS if c in sub.columns]
+            if power_feats:
+                nonnull_ratio = sub[power_feats].notna().mean()
+                # Keep important features even if they have some missing values (>= 30% non-null)
+                # Critical features like A/C Fan Speed should always be included
+                critical_features = [
+                    "A/C Fan Speed",
+                    "A/C Status",  # Combined ON/OFF and Mode
+                    # "A/C Mode",  # Now using A/C Status
+                    # "A/C ON/OFF",  # Now using A/C Status
+                    "A/C Set Temperature",
+                ]
+                power_feats = [
+                    c
+                    for c in power_feats
+                    if (c in critical_features and nonnull_ratio.get(c, 0.0) >= 0.3)
+                    or nonnull_ratio.get(c, 0.0) >= 0.9
+                ]
+            if len(power_feats) < 5:
+                print(
+                    f"[ModelBuilder] Zone {z}: insufficient power features {power_feats}"
+                )
+
+            X_p, y_p = self._split_xy(sub, "adjusted_power", power_feats)
             if len(X_p) < 5:
                 print(
                     f"[ModelBuilder] Zone {z}: Skipped (insufficient power samples after dropping NaNs: {len(X_p)} < 5)"
@@ -598,26 +780,18 @@ class PowerLogModel:
                 )
                 wtrp = None
 
-            power_base = Pipeline(
-                steps=[
-                    ("scaler", MinMaxScaler()),
-                    (
-                        "model",
-                        XGBRegressor(
-                            n_estimators=600,
-                            max_depth=6,
-                            learning_rate=0.05,
-                            subsample=0.8,
-                            colsample_bytree=0.9,
-                            random_state=42,
-                            n_jobs=-1,
-                            objective="reg:pseudohubererror",
-                        ),
-                    ),
-                ]
+            # Remove MinMaxScaler - it's causing constant predictions
+            power_model = XGBRegressor(
+                n_estimators=600,
+                max_depth=6,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.9,
+                random_state=42,
+                n_jobs=-1,
+                objective="reg:squarederror",  # Changed to squarederror for better stability
             )
-            # 目的変数のlog1p変換ラッパー
-            power_model = PowerLogModel(power_base)
+
             if wtrp is not None:
                 power_model.fit(Xtrp, ytrp, sample_weight=wtrp)
             else:
@@ -629,28 +803,21 @@ class PowerLogModel:
                 multi_targets = ["Indoor Temp.", "adjusted_power"]
                 # 利用可能チェック
                 if all(t in sub.columns for t in multi_targets):
-                    Xm, Ym = self._split_multi(sub, multi_targets, feats)
+                    Xm, Ym = self._split_multi(sub, multi_targets, temp_feats)
                     if len(Xm) >= 20:
                         Xm_tr, Xm_te, Ym_tr, Ym_te = train_test_split(
                             Xm, Ym, test_size=0.2, random_state=42
                         )
-                        base_xgb = Pipeline(
-                            steps=[
-                                ("scaler", MinMaxScaler()),
-                                (
-                                    "model",
-                                    XGBRegressor(
-                                        n_estimators=500,
-                                        max_depth=6,
-                                        learning_rate=0.05,
-                                        subsample=0.8,
-                                        colsample_bytree=0.9,
-                                        random_state=42,
-                                        n_jobs=-1,
-                                        objective="reg:pseudohubererror",
-                                    ),
-                                ),
-                            ]
+                        # Remove MinMaxScaler - XGBoost handles features internally
+                        base_xgb = XGBRegressor(
+                            n_estimators=500,
+                            max_depth=6,
+                            learning_rate=0.05,
+                            subsample=0.8,
+                            colsample_bytree=0.9,
+                            random_state=42,
+                            n_jobs=-1,
+                            objective="reg:squarederror",  # Changed to squarederror for better stability
                         )
                         multi_output_model = MultiOutputRegressor(base_xgb)
                         multi_output_model.fit(Xm_tr, Ym_tr)
@@ -701,10 +868,15 @@ class PowerLogModel:
             y_hat_t = temp_model.predict(Xte)
             temp_mae = mean_absolute_error(yte, y_hat_t)
             temp_mape = mean_absolute_percentage_error(yte, y_hat_t)
-            print(
-                f"[Model] {z} Temp: MAE={temp_mae:.2f} MAPE={temp_mape*100:.1f}% R2={r2_score(yte, y_hat_t):.3f}"
-            )
 
+            # Calculate temperature metrics
+            temp_metrics = {
+                "MAE": temp_mae,
+                "MAPE": temp_mape * 100,
+                "R2": r2_score(yte, y_hat_t),
+            }
+
+            # Calculate power metrics
             y_hat_p = power_model.predict(Xtep)
             # kW換算で評価
             ytep_kw = ytep / 1000.0
@@ -717,10 +889,14 @@ class PowerLogModel:
                 if nonzero_mask_p.any()
                 else np.nan
             )
-            print(
-                f"[Model] {z} Power: MAE(kW)={mean_absolute_error(ytep_kw, yhat_kw):.3f} "
-                f"MAPE={(power_mape*100 if not np.isnan(power_mape) else np.nan):.1f}% R2={r2_score(ytep, y_hat_p):.3f}"
-            )
+            power_metrics = {
+                "MAE": mean_absolute_error(ytep_kw, yhat_kw),
+                "MAPE": power_mape * 100 if not np.isnan(power_mape) else np.nan,
+                "R2": r2_score(ytep, y_hat_p),
+            }
+
+            # Print combined model evaluation table
+            print_model_evaluation_table(z, temp_metrics, power_metrics)
 
             # SHAP 可視化出力
             out_dir = os.path.join("analysis", "output", self.store_name, z)
@@ -748,7 +924,7 @@ class PowerLogModel:
                 hum_model=hum_model,
                 power_model=power_model,
                 multi_output_model=multi_output_model,
-                feature_cols=feats,
+                feature_cols=temp_feats,  # Use temp_feats for compatibility
             )
         # 保存
         from config.utils import get_data_path
@@ -766,4 +942,8 @@ class PowerLogModel:
                 },
                 os.path.join(mdir, f"models_{z}.pkl"),
             )
+
+        # Save validation results with input features and predictions
+        self._save_validation_results(area_df, models)
+
         return models

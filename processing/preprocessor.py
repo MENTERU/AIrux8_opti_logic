@@ -4,6 +4,12 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 
+from processing.utilities.category_mapping_loader import (
+    get_default_category_value,
+    map_category_series,
+)
+from processing.utilities.weatherapi_client import VisualCrossingWeatherAPIDataFetcher
+
 
 # =============================
 # STEP1: 前処理
@@ -91,9 +97,12 @@ class DataPreprocessor:
         return ac, pm
 
     def _apply_categorical_mapping(
-        self, dataframe: pd.DataFrame, column: str, mapping_dict: dict
+        self, dataframe: pd.DataFrame, column: str
     ) -> pd.DataFrame:
         """共通のカテゴリカル変数マッピングを適用"""
+        if column not in dataframe.columns:
+            return dataframe
+
         # マッピング前の値の確認
         original_values = dataframe[column].value_counts()
         print(
@@ -101,35 +110,29 @@ class DataPreprocessor:
             f"{original_values.head().to_dict()}"
         )
 
-        # マッピング実行
-        dataframe[column] = dataframe[column].map(mapping_dict)
+        original_series = dataframe[column]
+        mapped_series, applied_mapping, unmapped_values = map_category_series(
+            original_series, column
+        )
+        dataframe[column] = mapped_series
 
-        # マッピングされなかった値の確認
-        unmapped_mask = dataframe[column].isnull()
-        if unmapped_mask.any():
-            unmapped_values = dataframe.loc[unmapped_mask, column].value_counts()
+        if unmapped_values:
             print(
                 f"[DataPreprocessor] {column} マッピングされなかった値: "
-                f"{unmapped_values.to_dict()}"
+                f"{unmapped_values}"
             )
-
-            # デフォルト値の設定
-            if column == "A/C ON/OFF":
-                default_value = 0  # OFFをデフォルト
-            elif column == "A/C Mode":
-                default_value = 2  # FANをデフォルト
-            elif column == "A/C Fan Speed":
-                default_value = 1  # Lowをデフォルト
-            else:
-                default_value = 0
-
-            dataframe[column] = dataframe[column].fillna(default_value)
-            print(
-                f"[DataPreprocessor] {column} デフォルト値({default_value})で置換: "
-                f"{unmapped_mask.sum()}件"
-            )
+            unmapped_mask = mapped_series.isna() & original_series.notna()
+            default_value = get_default_category_value(column)
+            if default_value is not None:
+                dataframe.loc[unmapped_mask, column] = default_value
+                print(
+                    f"[DataPreprocessor] {column} デフォルト値({default_value})で置換: "
+                    f"{int(unmapped_mask.sum())}件"
+                )
         else:
             print(f"[DataPreprocessor] {column} 全ての値が正常にマッピングされました")
+
+        dataframe[column] = dataframe[column].astype(pd.Int64Dtype())
 
         return dataframe
 
@@ -186,45 +189,38 @@ class DataPreprocessor:
                         f"[DataPreprocessor] {zone} - {column} ユニーク値: {unique_values.to_dict()}"
                     )
 
-                    # 自動マッピング生成
-                    mapping = self._generate_zone_mapping(zone, column, unique_values)
-                    zone_log["categorical_mappings"][column] = {
+                    original_zone_series = zone_data[column]
+                    mapped_series, applied_mapping, unmapped_values = map_category_series(
+                        original_zone_series, column
+                    )
+                    zone_data[column] = mapped_series
+
+                    zone_log_entry = {
                         "original_values": unique_values.to_dict(),
-                        "mapping": mapping,
-                        "mapped_count": len(unique_values),
-                        "unmapped_count": 0,
+                        "mapping": applied_mapping,
+                        "mapped_count": len(applied_mapping),
+                        "unmapped_count": int(sum(unmapped_values.values())),
                     }
+                    if unmapped_values:
+                        zone_log_entry["unmapped_values"] = unmapped_values
+                    zone_log["categorical_mappings"][column] = zone_log_entry
 
-                    # マッピング適用
-                    zone_data[column] = zone_data[column].map(mapping)
-
-                    # マッピングされなかった値の処理
-                    unmapped_mask = zone_data[column].isnull()
-                    if unmapped_mask.any():
-                        unmapped_values = zone_data.loc[
-                            unmapped_mask, column
-                        ].value_counts()
+                    if unmapped_values:
                         print(
-                            f"[DataPreprocessor] {zone} - {column} マッピングされなかった値: {unmapped_values.to_dict()}"
+                            f"[DataPreprocessor] {zone} - {column} マッピングされなかった値: {unmapped_values}"
                         )
+                        unmapped_mask = mapped_series.isna() & original_zone_series.notna()
+                        default_value = get_default_category_value(column)
+                        if default_value is not None:
+                            zone_data.loc[unmapped_mask, column] = default_value
+                            zone_log["categorical_mappings"][column][
+                                "default_value"
+                            ] = default_value
+                            print(
+                                f"[DataPreprocessor] {zone} - {column} デフォルト値({default_value})で置換: {int(unmapped_mask.sum())}件"
+                            )
 
-                        # デフォルト値設定
-                        default_value = self._get_default_value(column)
-                        zone_data[column] = zone_data[column].fillna(default_value)
-
-                        zone_log["categorical_mappings"][column][
-                            "unmapped_values"
-                        ] = unmapped_values.to_dict()
-                        zone_log["categorical_mappings"][column][
-                            "unmapped_count"
-                        ] = unmapped_mask.sum()
-                        zone_log["categorical_mappings"][column][
-                            "default_value"
-                        ] = default_value
-
-                        print(
-                            f"[DataPreprocessor] {zone} - {column} デフォルト値({default_value})で置換: {unmapped_mask.sum()}件"
-                        )
+                    zone_data[column] = zone_data[column].astype(pd.Int64Dtype())
 
                     # 元のデータフレームを更新
                     dataframe.loc[dataframe["zone"] == zone, column] = zone_data[column]
@@ -241,98 +237,6 @@ class DataPreprocessor:
         dataframe = dataframe.drop("zone", axis=1)
 
         return dataframe
-
-    def _generate_zone_mapping(
-        self, zone: str, column: str, unique_values: pd.Series
-    ) -> dict:
-        """エリア固有のマッピングを自動生成"""
-        mapping = {}
-
-        for value in unique_values.index:
-            if pd.isna(value):
-                continue
-
-            # 値の正規化
-            normalized_value = str(value).strip().upper()
-
-            if column == "A/C ON/OFF":
-                if any(
-                    keyword in normalized_value
-                    for keyword in ["ON", "1", "TRUE", "有効"]
-                ):
-                    mapping[value] = 1
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["OFF", "0", "FALSE", "無効"]
-                ):
-                    mapping[value] = 0
-                else:
-                    # デフォルトはOFF
-                    mapping[value] = 0
-
-            elif column == "A/C Mode":
-                if any(
-                    keyword in normalized_value
-                    for keyword in ["COOL", "冷房", "COOLING"]
-                ):
-                    mapping[value] = 0
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["DEHUM", "除湿", "DEHUMIDIFY"]
-                ):
-                    mapping[value] = 1
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["FAN", "送風", "FAN_ONLY"]
-                ):
-                    mapping[value] = 2
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["HEAT", "暖房", "HEATING"]
-                ):
-                    mapping[value] = 3
-                else:
-                    # デフォルトはFAN
-                    mapping[value] = 2
-
-            elif column == "A/C Fan Speed":
-                if any(
-                    keyword in normalized_value
-                    for keyword in ["AUTO", "自動", "AUTOMATIC"]
-                ):
-                    mapping[value] = 0
-                elif any(keyword in normalized_value for keyword in ["LOW", "低", "1"]):
-                    mapping[value] = 1
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["MEDIUM", "中", "2", "MID"]
-                ):
-                    mapping[value] = 2
-                elif any(
-                    keyword in normalized_value for keyword in ["HIGH", "高", "3"]
-                ):
-                    mapping[value] = 3
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["TOP", "最高", "4", "MAX"]
-                ):
-                    mapping[value] = 4
-                else:
-                    # デフォルトはLow
-                    mapping[value] = 1
-
-        return mapping
-
-    def _get_default_value(self, column: str) -> int:
-        """カラム別のデフォルト値を取得"""
-        if column == "A/C ON/OFF":
-            return 0  # OFF
-        elif column == "A/C Mode":
-            return 2  # FAN
-        elif column == "A/C Fan Speed":
-            return 1  # Low
-        else:
-            return 0
 
     def preprocess_ac(
         self,
@@ -416,10 +320,73 @@ class DataPreprocessor:
 
         return dataframe
 
+    def _fetch_historical_weather(
+        self,
+        ac_data: Optional[pd.DataFrame],
+        pm_data: Optional[pd.DataFrame],
+        weather_api_key: str,
+        coordinates: str,
+    ) -> Optional[pd.DataFrame]:
+        """Fetch historical weather data based on the date range of AC/PM data"""
+        if not weather_api_key or not coordinates:
+            print(
+                "[DataPreprocessor] No weather API key or coordinates provided, skipping historical weather fetch"
+            )
+            return None
+
+        # Determine date range from the data
+        date_ranges = []
+        if ac_data is not None and not ac_data.empty:
+            ac_dates = pd.to_datetime(ac_data["Datetime"])
+            date_ranges.append((ac_dates.min(), ac_dates.max()))
+        if pm_data is not None and not pm_data.empty:
+            pm_dates = pd.to_datetime(pm_data["Datetime"])
+            date_ranges.append((pm_dates.min(), pm_dates.max()))
+
+        if not date_ranges:
+            print("[DataPreprocessor] No data available to determine date range")
+            return None
+
+        # Get the overall date range
+        min_date = min(dt[0] for dt in date_ranges)
+        max_date = max(dt[1] for dt in date_ranges)
+
+        start_date = min_date.strftime("%Y-%m-%d")
+        end_date = max_date.strftime("%Y-%m-%d")
+
+        print(
+            f"[DataPreprocessor] Fetching historical weather data from {start_date} to {end_date}"
+        )
+
+        try:
+            weather_df = VisualCrossingWeatherAPIDataFetcher(
+                coordinates=coordinates,
+                start_date=start_date,
+                end_date=end_date,
+                unit="metric",
+                api_key=weather_api_key,
+                batch_size_months=1,  # Process 1 month at a time
+                delay_between_requests=1.0,  # 1 second delay between requests
+            ).fetch()
+
+            if weather_df is not None:
+                print(
+                    f"[DataPreprocessor] Historical weather data fetched successfully. Shape: {weather_df.shape}"
+                )
+                return weather_df
+            else:
+                print("[DataPreprocessor] Failed to fetch historical weather data")
+                return None
+
+        except Exception as e:
+            print(f"[DataPreprocessor] Error fetching historical weather data: {e}")
+            return None
+
     def save(
         self,
         ac_control_data: Optional[pd.DataFrame],
         power_meter_data: Optional[pd.DataFrame],
+        weather_data: Optional[pd.DataFrame],
     ):
         if ac_control_data is not None:
             ac_control_data.to_csv(
@@ -433,6 +400,14 @@ class DataPreprocessor:
             power_meter_data.to_csv(
                 os.path.join(
                     self.output_dir, f"power_meter_processed_{self.store_name}.csv"
+                ),
+                index=False,
+                encoding="utf-8-sig",
+            )
+        if weather_data is not None:
+            weather_data.to_csv(
+                os.path.join(
+                    self.output_dir, f"weather_processed_{self.store_name}.csv"
                 ),
                 index=False,
                 encoding="utf-8-sig",

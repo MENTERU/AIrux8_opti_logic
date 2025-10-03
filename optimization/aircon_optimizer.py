@@ -39,8 +39,10 @@ from optimization.period_optimizer import PeriodOptimizer
 from planning.planner import Planner
 from processing.aggregator import AreaAggregator
 from processing.preprocessor import DataPreprocessor
+from processing.utilities.helper_functions import analyze_feature_correlations
 from processing.utilities.master_loader import MasterLoader
 from processing.utilities.weatherapi_client import VisualCrossingWeatherAPIDataFetcher
+from training.data_processor import DataProcessor
 from training.model_builder import ModelBuilder
 
 warnings.filterwarnings("ignore")
@@ -50,9 +52,15 @@ warnings.filterwarnings("ignore")
 # 統合ランナー
 # =============================
 class AirconOptimizer:
-    def __init__(self, store_name: str, enable_preprocessing: bool = True):
+    def __init__(
+        self,
+        store_name: str,
+        enable_preprocessing: bool = True,
+        skip_aggregation: bool = False,
+    ):
         self.store_name = store_name
         self.enable_preprocessing = enable_preprocessing
+        self.skip_aggregation = skip_aggregation
         self.master = MasterLoader(store_name).load()
         from config.utils import get_data_path
 
@@ -67,9 +75,112 @@ class AirconOptimizer:
         pm_p = os.path.join(
             self.proc_dir, f"power_meter_processed_{self.store_name}.csv"
         )
+        weather_p = os.path.join(
+            self.proc_dir, f"weather_processed_{self.store_name}.csv"
+        )
         ac = pd.read_csv(ac_p) if os.path.exists(ac_p) else None
         pm = pd.read_csv(pm_p) if os.path.exists(pm_p) else None
-        return ac, pm
+        weather = pd.read_csv(weather_p) if os.path.exists(weather_p) else None
+        return ac, pm, weather
+
+    def _get_weather_forecast_path(self, start_date: str, end_date: str) -> str:
+        """
+        Generate weather forecast file path with date range in filename
+
+        Args:
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+
+        Returns:
+            Full path to the weather forecast file
+        """
+        # Format dates for filename (remove dashes)
+        start_clean = start_date.replace("-", "")
+        end_clean = end_date.replace("-", "")
+        filename = f"weather_forecast_{start_clean}_{end_clean}.csv"
+        return os.path.join(self.plan_dir, filename)
+
+    def _load_weather_forecast(
+        self, start_date: str, end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """
+        Load weather forecast from cached file if it exists
+
+        Args:
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+
+        Returns:
+            Weather DataFrame if file exists, None otherwise
+        """
+        forecast_path = self._get_weather_forecast_path(start_date, end_date)
+
+        if os.path.exists(forecast_path):
+            print(f"[Run] Loading cached weather forecast: {forecast_path}")
+            try:
+                weather_df = pd.read_csv(forecast_path)
+
+                # Convert datetime column to datetime type if it exists
+                if "datetime" in weather_df.columns:
+                    weather_df["datetime"] = pd.to_datetime(weather_df["datetime"])
+                    print(f"[Run] Converted datetime column to datetime type")
+
+                print(f"[Run] Cached weather data loaded. Shape: {weather_df.shape}")
+                return weather_df
+            except Exception as e:
+                print(f"[Run] Error loading cached weather data: {e}")
+                return None
+        else:
+            print(f"[Run] No cached weather forecast found: {forecast_path}")
+            return None
+
+    def _save_weather_forecast(
+        self, weather_df: pd.DataFrame, start_date: str, end_date: str
+    ) -> None:
+        """
+        Save weather forecast to cached file with date range in filename
+
+        Args:
+            weather_df: Weather DataFrame to save
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+        """
+        forecast_path = self._get_weather_forecast_path(start_date, end_date)
+
+        try:
+            os.makedirs(os.path.dirname(forecast_path), exist_ok=True)
+            weather_df.to_csv(forecast_path, index=False, encoding="utf-8-sig")
+            print(f"[Run] Weather forecast cached to: {forecast_path}")
+        except Exception as e:
+            print(f"[Run] Error saving weather forecast: {e}")
+
+    def _load_features_directly(self) -> Optional[pd.DataFrame]:
+        """
+        Load features directly from the processed CSV file, skipping aggregation
+        """
+        features_path = os.path.join(
+            self.proc_dir, f"features_processed_{self.store_name}.csv"
+        )
+
+        if os.path.exists(features_path):
+            print(f"[Run] Loading features directly from: {features_path}")
+            try:
+                area_df = pd.read_csv(features_path)
+                print(f"[Run] Features loaded successfully. Shape: {area_df.shape}")
+
+                if "zone" in area_df.columns:
+                    zones = area_df["zone"].unique()
+                    print(f"[Run] Zones found: {zones}")
+                else:
+                    print("[Run] Warning: No 'zone' column found in features data")
+
+                return area_df
+            except Exception as e:
+                print(f"[Run] Error loading features: {e}")
+                return None
+        else:
+            print(f"[Run] Features file not found: {features_path}")
+            return None
 
     def run(
         self,
@@ -117,7 +228,33 @@ class AirconOptimizer:
                 pm_raw_data, power_std_multiplier
             )
             print("[Run] PM data preprocessed, saving...")
-            preprocessor.save(ac_processed_data, pm_processed_data)
+            print("[Run] PM data preprocessed, checking for cached weather data...")
+
+            # Check if weather_processed file exists
+            weather_file = os.path.join(
+                self.proc_dir, f"weather_processed_{self.store_name}.csv"
+            )
+            if os.path.exists(weather_file):
+                print(f"[Run] Found cached weather data: {weather_file}")
+                historical_weather_data = pd.read_csv(weather_file)
+                # Convert datetime column if it exists
+                if "datetime" in historical_weather_data.columns:
+                    historical_weather_data["datetime"] = pd.to_datetime(
+                        historical_weather_data["datetime"]
+                    )
+                print(
+                    f"[Run] Loaded cached weather data: {len(historical_weather_data)} records"
+                )
+            else:
+                print("[Run] No cached weather data found, fetching from API...")
+                historical_weather_data = preprocessor._fetch_historical_weather(
+                    ac_processed_data, pm_processed_data, weather_api_key, coordinates
+                )
+                print("[Run] Historical weather data fetched from API, saving...")
+            print("[Run] Saving processed data...")
+            preprocessor.save(
+                ac_processed_data, pm_processed_data, historical_weather_data
+            )
             preprocessing_end_time = time.perf_counter()
             processing_times["前処理"] = (
                 preprocessing_end_time - preprocessing_start_time
@@ -127,7 +264,9 @@ class AirconOptimizer:
             )
         else:
             print("[Run] Loading processed data...")
-            ac_processed_data, pm_processed_data = self._load_processed()
+            ac_processed_data, pm_processed_data, historical_weather_data = (
+                self._load_processed()
+            )
             print("[Run] Processed data loaded")
         # 天候データ取得（実績期間＋最適化期間をカバー）
         weather_start_time = time.perf_counter()
@@ -192,54 +331,72 @@ class AirconOptimizer:
         )
         print(f"[Run] Coordinates: {coordinates}")
 
+        # ----------------------------
+
+        # 天候データ取得 (Cached or API)
+        # ----------------------------
         weather_df = None
-        if weather_api_key:
-            print("[Run] Attempting to fetch weather data from API...")
+
+        # First, try to load from cached file
+        weather_df = self._load_weather_forecast(start_date, end_date)
+
+        # If no cached data found, fetch from API
+        if weather_df is None and weather_api_key:
+            print("[Run] No cached weather data found. Fetching from API...")
             try:
-                # 月次チャンクで分割取得（APIコスト回避）
-                cur = combined_start_dt
-                chunks = []
-                while cur <= combined_end_dt:
-                    chunk_start = cur
-                    # 月末まで or combined_end_dt まで
-                    next_month = (
-                        chunk_start.replace(day=1) + pd.offsets.MonthEnd(1)
-                    ).to_pydatetime()
-                    chunk_end = pd.Timestamp(min(next_month, combined_end_dt))
-                    s = chunk_start.strftime("%Y-%m-%d")
-                    e = chunk_end.strftime("%Y-%m-%d")
-                    print(f"[Weather] Fetching chunk: {s} -> {e}")
-                    try:
-                        chunk_df = VisualCrossingWeatherAPIDataFetcher(
-                            coordinates=coordinates,
-                            start_date=s,
-                            end_date=e,
-                            unit="metric",
-                            api_key=weather_api_key,
-                        ).fetch()
-                        if chunk_df is not None and not chunk_df.empty:
-                            chunks.append(chunk_df)
-                    except Exception as ce:
-                        print(f"[Weather] Chunk fetch failed: {ce}")
-                    # 次の開始は翌月1日
-                    cur = (chunk_end + pd.Timedelta(days=1)).normalize()
-                if chunks:
-                    weather_df = pd.concat(chunks, axis=0, ignore_index=True)
-                    # 重複除去
-                    if "datetime" in weather_df.columns:
-                        weather_df["datetime"] = pd.to_datetime(
-                            weather_df["datetime"]
-                        ).dt.floor("H")
-                        weather_df = weather_df.drop_duplicates(
-                            subset=["datetime"]
-                        ).sort_values("datetime")
+                weather_df = VisualCrossingWeatherAPIDataFetcher(
+                    coordinates=coordinates,
+                    start_date=start_date,
+                    end_date=end_date,
+                    unit="metric",
+                    api_key=weather_api_key,
+                ).fetch()
                 print(f"[Run] Weather API result: {weather_df is not None}")
                 if weather_df is not None:
                     print(f"[Run] Weather data shape: {weather_df.shape}")
                     print(f"[Run] Weather data columns: {list(weather_df.columns)}")
+
+                    # Save the fetched data to cache
+                    self._save_weather_forecast(weather_df, start_date, end_date)
             except Exception as e:
                 print(f"[Run] Weather API exception: {e}")
                 weather_df = None
+        elif weather_df is not None:
+            print("[Run] Using cached weather data - no API call needed")
+        else:
+            print("[Run] No weather API key provided and no cached data found")
+
+        # 天候データの統合（履歴 + 未来）
+        combined_weather_df = None
+        if historical_weather_data is not None and not historical_weather_data.empty:
+            print("[Run] Combining historical and future weather data...")
+            if weather_df is not None and not weather_df.empty:
+                # 重複を避けるため、未来の天候データから履歴期間を除外
+                historical_max_date = pd.to_datetime(
+                    historical_weather_data["datetime"]
+                ).max()
+                weather_df_filtered = weather_df[
+                    pd.to_datetime(weather_df["datetime"]) > historical_max_date
+                ]
+                if not weather_df_filtered.empty:
+                    combined_weather_df = pd.concat(
+                        [historical_weather_data, weather_df_filtered],
+                        ignore_index=True,
+                    )
+                    print(
+                        f"[Run] Combined weather data: {len(historical_weather_data)} historical + {len(weather_df_filtered)} future records"
+                    )
+                else:
+                    combined_weather_df = historical_weather_data
+                    print(
+                        "[Run] Using only historical weather data (no future data needed)"
+                    )
+            else:
+                combined_weather_df = historical_weather_data
+                print("[Run] Using only historical weather data")
+        else:
+            combined_weather_df = weather_df
+            print("[Run] Using only future weather data")
 
         weather_end_time = time.perf_counter()
         processing_times["天候データ取得"] = weather_end_time - weather_start_time
@@ -249,14 +406,25 @@ class AirconOptimizer:
 
         # 制御エリア集約
         aggregation_start_time = time.perf_counter()
-        print("[Run] Starting area aggregation...")
-        aggregator = AreaAggregator(self.master)
-        area_df = aggregator.build(
-            ac_processed_data, pm_processed_data, weather_df, freq=freq
-        )
-        print(
-            f"[Run] Area aggregation completed. Shape: {area_df.shape if area_df is not None else 'None'}"
-        )
+
+        if self.skip_aggregation:
+            print("[Run] Skipping aggregation, loading features directly...")
+            area_df = self._load_features_directly()
+        else:
+            print("[Run] Starting area aggregation...")
+            aggregator = AreaAggregator(self.master)
+            area_df = aggregator.build(
+                ac_processed_data, pm_processed_data, combined_weather_df, freq=freq
+            )
+            area_out = os.path.join(
+                self.proc_dir, f"features_processed_{self.store_name}.csv"
+            )
+            os.makedirs(self.proc_dir, exist_ok=True)
+            area_df.to_csv(area_out, index=False, encoding="utf-8-sig")
+            print(f"[Run] Area data saved to: {area_out}")
+            print(
+                f"[Run] Area aggregation completed. Shape: {area_df.shape if area_df is not None else 'None'}"
+            )
 
         if area_df is not None and not area_df.empty:
             print(f"[Run] Area data columns: {list(area_df.columns)}")
@@ -269,79 +437,16 @@ class AirconOptimizer:
 
         # 特徴量の確認と相関の簡易レポート
         if area_df is not None:
-            base_feats = [
-                "A/C Set Temperature",
-                "Indoor Temp. Lag1",
-                "A/C ON/OFF",
-                "A/C Mode",
-                "A/C Fan Speed",
-                "Outdoor Temp.",
-                "Outdoor Humidity",
-                "Solar Radiation",
-                "DayOfWeek",
-                "Hour",
-                "Month",
-                "IsWeekend",
-                "IsHoliday",
-            ]
-            available_feats = [col for col in base_feats if col in area_df.columns]
-            missing_feats = [col for col in base_feats if col not in area_df.columns]
+            # Use helper function for correlation analysis
+            correlation_results = analyze_feature_correlations(area_df)
 
-            print(f"\n✅ 利用可能な特徴量 ({len(available_feats)}個):")
-            for feat in available_feats:
-                print(f"  - {feat}")
+            # Process features for model training
+            print("[Run] Processing features for model training...")
+            data_processor = DataProcessor()
+            area_df = data_processor.process_features(area_df)
 
-            if missing_feats:
-                print(f"\n⚠️ 不足している特徴量 ({len(missing_feats)}個):")
-                for feat in missing_feats:
-                    print(f"  - {feat}")
-
-            # 相関行列の作成（存在する列のみで計算）
-            target_cols = [
-                c
-                for c in (available_feats + ["Indoor Temp.", "adjusted_power"])
-                if c in area_df.columns
-            ]
-            if target_cols:
-                print(f"\n🔍 特徴量間の相関確認:")
-                corr_matrix = area_df[target_cols].corr(numeric_only=True)
-
-                if "Indoor Temp." in corr_matrix.columns:
-                    temp_corr = (
-                        corr_matrix["Indoor Temp."]
-                        .drop(
-                            labels=[
-                                c for c in ["Indoor Temp."] if c in corr_matrix.index
-                            ]
-                        )
-                        .abs()
-                        .sort_values(ascending=False)
-                    )
-                    print(f"\n🌡️ 室温との相関 (上位10位):")
-                    for feat, corr in temp_corr.head(10).items():
-                        print(f"  {feat}: {corr:.3f}")
-
-                if "adjusted_power" in corr_matrix.columns:
-                    power_corr = (
-                        corr_matrix["adjusted_power"]
-                        .drop(
-                            labels=[
-                                c for c in ["adjusted_power"] if c in corr_matrix.index
-                            ]
-                        )
-                        .abs()
-                        .sort_values(ascending=False)
-                    )
-                    print(f"\n⚡ 電力との相関 (上位10位):")
-                    for feat, corr in power_corr.head(10).items():
-                        print(f"  {feat}: {corr:.3f}")
-
-        area_out = os.path.join(
-            self.proc_dir, f"features_processed_{self.store_name}.csv"
-        )
-        os.makedirs(self.proc_dir, exist_ok=True)
-        area_df.to_csv(area_out, index=False, encoding="utf-8-sig")
-        print(f"[Run] Area data saved to: {area_out}")
+            # Print feature summary
+            data_processor.print_feature_summary(area_df)
 
         # 天気予報データの出力（最適化期間のみ）
         if weather_df is not None:
@@ -349,8 +454,9 @@ class AirconOptimizer:
                 (weather_df["datetime"] >= pd.to_datetime(start_date))
                 & (weather_df["datetime"] <= pd.to_datetime(end_date))
             ].copy()
-            # 出力先は初期化時に計算した plan_dir を利用
-            forecast_path = os.path.join(self.plan_dir, "weather_forecast.csv")
+
+            # Save forecast with date-based filename (already cached above, but save filtered version too)
+            forecast_path = self._get_weather_forecast_path(start_date, end_date)
             os.makedirs(os.path.dirname(forecast_path), exist_ok=True)
             forecast_df.to_csv(forecast_path, index=False, encoding="utf-8-sig")
             print(f"[Run] Weather forecast saved to: {forecast_path}")
@@ -416,7 +522,7 @@ class AirconOptimizer:
         print(f"{'='*60}")
         print(f"{'総処理時間':12}: {processing_times['総処理時間']:6.2f}秒 (100.0%)")
         print(f"{'='*60}")
-
+        # schedule = None
         return schedule
 
 
