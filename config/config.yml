@@ -5,6 +5,7 @@ local_paths:
   models_path: "data/03_Models"
   master_data_path: "data/01_MasterData"
   output_data_path: "data/04_PlanningData"
+  valid_results_path: "data/05_ValidationResults"
 
   # Google Drive設定　（local_pathsからの相対パス）
   service_account_json: "config/gdrive_service_account.json"
@@ -42,4 +43,3 @@ remote_paths:
   folder_id: "11WsqJyj0yq8AVqU5qQiRKmSxiR2_A_9E"
   encoding: "utf-8"
   remote_file_path: "data/04_PlanningData"
-

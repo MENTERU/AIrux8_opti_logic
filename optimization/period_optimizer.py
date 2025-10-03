@@ -15,6 +15,8 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+from optimization.feature_builder import OptimizationFeatureBuilder
+from processing.utilities.category_mapping_loader import normalize_candidate_values
 from training.model_builder import EnvPowerModels
 
 
@@ -35,6 +37,9 @@ def optimize_zone_period(
     """
     print(f"[PeriodOptimizer] Starting period optimization for zone: {zone_name}")
 
+    # Initialize feature builder
+    feature_builder = OptimizationFeatureBuilder()
+
     # パラメータ
     beam_width = 5  # 時刻ごとに保持する候補数（高速化のため削減）
 
@@ -54,16 +59,23 @@ def optimize_zone_period(
     sp_min = int(zone_data.get("setpoint_min", 22))
     sp_max = int(zone_data.get("setpoint_max", 28))
     sp_list = list(range(sp_min, sp_max + 1))
-    mode_list = zone_data.get("mode_candidates", [0, 1, 2])
+    mode_candidates = zone_data.get("mode_candidates")
+    if mode_candidates is not None and not isinstance(
+        mode_candidates, (list, tuple, set)
+    ):
+        mode_candidates = [mode_candidates]
+    mode_list = normalize_candidate_values(
+        "A/C Mode", mode_candidates, ("COOL", "HEAT", "FAN")
+    )
 
-    fan_candidates = zone_data.get("fan_candidates", [1, 2, 3])
-    fan_mapping = {"Auto": 0, "Low": 1, "Medium": 2, "High": 3, "Top": 4}
-    fan_list = []
-    for fan in fan_candidates:
-        if isinstance(fan, str):
-            fan_list.append(fan_mapping.get(fan, 1))
-        else:
-            fan_list.append(int(fan))
+    fan_candidates = zone_data.get("fan_candidates")
+    if fan_candidates is not None and not isinstance(
+        fan_candidates, (list, tuple, set)
+    ):
+        fan_candidates = [fan_candidates]
+    fan_list = normalize_candidate_values(
+        "A/C Fan Speed", fan_candidates, ("Low", "Medium", "High")
+    )
 
     print(
         f"[PeriodOptimizer] Zone {zone_name}: Beam search with width={beam_width}, "
@@ -135,25 +147,28 @@ def optimize_zone_period(
                 for md in mode_list:
                     for fs in fan_list:
                         # 特徴量の作成
-                        features = pd.DataFrame(
-                            [
-                                {
-                                    "A/C Set Temperature": sp,
-                                    "Indoor Temp. Lag1": last_temp,
-                                    "A/C ON/OFF": 1 if is_biz else 0,
-                                    "A/C Mode": md,
-                                    "A/C Fan Speed": fs,
-                                    "Outdoor Temp.": weather["outdoor_temp"],
-                                    "Outdoor Humidity": weather["outdoor_humidity"],
-                                    "Solar Radiation": weather["solar_radiation"],
-                                    "DayOfWeek": time_features[timestamp]["DayOfWeek"],
-                                    "Hour": time_features[timestamp]["Hour"],
-                                    "Month": time_features[timestamp]["Month"],
-                                    "IsWeekend": time_features[timestamp]["IsWeekend"],
-                                    "IsHoliday": time_features[timestamp]["IsHoliday"],
-                                }
-                            ]
-                        )[models.feature_cols]
+                        base_features = {
+                            "A/C Set Temperature": sp,
+                            "Indoor Temp. Lag1": last_temp,
+                            "A/C ON/OFF": 1 if is_biz else 0,
+                            "A/C Mode": md,
+                            "A/C Fan Speed": fs,
+                            "Outdoor Temp.": weather["outdoor_temp"],
+                            "Outdoor Humidity": weather["outdoor_humidity"],
+                            "Solar Radiation": weather["solar_radiation"],
+                        }
+
+                        # Build complete feature set using feature builder
+                        features_df = feature_builder.build_features(
+                            base_features=base_features,
+                            timestamp=timestamp,
+                            zone_name=zone_name,
+                            weather_history=None,  # Could be enhanced with actual history
+                            power_history=None,  # Could be enhanced with actual history
+                        )
+
+                        # Select only the features the model expects
+                        features = features_df[models.feature_cols]
 
                         # 電力予測の条件を学習時と統一（ON/OFF状態に基づく）
                         power_prediction_onoff = 1 if is_biz else 0

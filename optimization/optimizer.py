@@ -3,7 +3,25 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+from processing.utilities.category_mapping_loader import (
+    get_category_mapping,
+    get_inverse_category_mapping,
+    normalize_candidate_values,
+)
 from training.model_builder import EnvPowerModels
+
+MODE_MAPPING = get_category_mapping("A/C Mode")
+MODE_INVERSE_MAPPING = get_inverse_category_mapping("A/C Mode")
+FALLBACK_MODE_LABEL = (
+    "FAN" if "FAN" in MODE_MAPPING else next(iter(MODE_MAPPING.keys()))
+)
+FALLBACK_MODE_CODE = MODE_MAPPING[FALLBACK_MODE_LABEL]
+
+FAN_SPEED_MAPPING = get_category_mapping("A/C Fan Speed")
+FALLBACK_FAN_LABEL = (
+    "Low" if "Low" in FAN_SPEED_MAPPING else next(iter(FAN_SPEED_MAPPING.keys()))
+)
+FALLBACK_FAN_CODE = FAN_SPEED_MAPPING[FALLBACK_FAN_LABEL]
 
 
 # =============================
@@ -16,7 +34,7 @@ class Optimizer:
 
     @staticmethod
     def _mode_name(n: int) -> str:
-        return {0: "COOL", 1: "DEHUM", 2: "FAN", 3: "HEAT"}.get(n, "FAN")
+        return MODE_INVERSE_MAPPING.get(n, FALLBACK_MODE_LABEL)
 
     def _eval_score(
         self,
@@ -41,17 +59,23 @@ class Optimizer:
         sp_min = int(ctrl.get("setpoint_min", 22))
         sp_max = int(ctrl.get("setpoint_max", 28))
         setpoints = list(range(sp_min, sp_max + 1))
-        modes = ctrl.get("mode_candidates", [0, 1, 2])  # 0:COOL,1:DEHUM,2:FAN
+        mode_candidates = ctrl.get("mode_candidates")
+        if mode_candidates is not None and not isinstance(
+            mode_candidates, (list, tuple, set)
+        ):
+            mode_candidates = [mode_candidates]
+        modes = normalize_candidate_values(
+            "A/C Mode", mode_candidates, ("COOL", "HEAT", "FAN")
+        )
 
-        # Convert fan speed strings to numeric values
-        fan_candidates = ctrl.get("fan_candidates", [1, 2, 3])
-        fan_mapping = {"Auto": 0, "Low": 1, "Medium": 2, "High": 3, "Top": 4}
-        fans = []
-        for fan in fan_candidates:
-            if isinstance(fan, str):
-                fans.append(fan_mapping.get(fan, 1))  # Default to 1 if not found
-            else:
-                fans.append(int(fan))
+        fan_candidates = ctrl.get("fan_candidates")
+        if fan_candidates is not None and not isinstance(
+            fan_candidates, (list, tuple, set)
+        ):
+            fan_candidates = [fan_candidates]
+        fans = normalize_candidate_values(
+            "A/C Fan Speed", fan_candidates, ("Low", "Medium", "High")
+        )
 
         return setpoints, modes, fans
 
@@ -184,19 +208,19 @@ class Optimizer:
                     print(
                         f"    - Predicted: {best['pred_temp']:.1f}°C, {best['pred_power']:.0f}W, Score={best['score']:.1f}"
                     )
-                z_schedule[t] = (
-                    best
-                    if best is not None
-                    else {
-                        "set_temp": 25,
-                        "mode": 2,
-                        "fan": 1,
-                        "pred_temp": last_temp,
-                        "pred_power": 0.0,
-                        "score": 9e9,
-                    }
-                )
-                last_temp = z_schedule[t]["pred_temp"]
+            z_schedule[t] = (
+                best
+                if best is not None
+                else {
+                    "set_temp": 25,
+                    "mode": FALLBACK_MODE_CODE,
+                    "fan": FALLBACK_FAN_CODE,
+                    "pred_temp": last_temp,
+                    "pred_power": 0.0,
+                    "score": 9e9,
+                }
+            )
+            last_temp = z_schedule[t]["pred_temp"]
 
             results[z] = z_schedule
             print(f"[Optimizer] Zone {z} completed - {len(z_schedule)} hours scheduled")
@@ -219,8 +243,8 @@ class Optimizer:
                     "zone": zone_name,
                     "datetime": timestamp,
                     "set_temp": settings.get("set_temp", 25),
-                    "mode": settings.get("mode", 2),
-                    "fan": settings.get("fan", 1),
+                    "mode": settings.get("mode", FALLBACK_MODE_CODE),
+                    "fan": settings.get("fan", FALLBACK_FAN_CODE),
                     "pred_temp": settings.get("pred_temp", 25.0),
                     "pred_power": settings.get("pred_power", 0.0),
                     "score": settings.get("score", 0.0),

@@ -4,6 +4,26 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
+from processing.utilities.category_mapping_loader import (
+    get_category_mapping,
+    get_inverse_category_mapping,
+)
+
+
+MODE_LABEL_TO_CODE = get_category_mapping("A/C Mode")
+MODE_CODE_TO_LABEL = get_inverse_category_mapping("A/C Mode")
+FALLBACK_MODE_LABEL = (
+    "FAN" if "FAN" in MODE_LABEL_TO_CODE else next(iter(MODE_LABEL_TO_CODE.keys()))
+)
+FALLBACK_MODE_CODE = MODE_LABEL_TO_CODE[FALLBACK_MODE_LABEL]
+
+FAN_LABEL_TO_CODE = get_category_mapping("A/C Fan Speed")
+FALLBACK_FAN_CODE = (
+    FAN_LABEL_TO_CODE.get("Low")
+    if "Low" in FAN_LABEL_TO_CODE
+    else next(iter(FAN_LABEL_TO_CODE.values()))
+)
+
 
 # =============================
 # STEP4: 出力（制御区分別 & 室内機別）
@@ -15,7 +35,7 @@ class Planner:
 
     @staticmethod
     def _mode_text(n: int) -> str:
-        return {0: "COOL", 1: "DEHUM", 2: "FAN", 3: "HEAT"}.get(n, "FAN")
+        return MODE_CODE_TO_LABEL.get(n, FALLBACK_MODE_LABEL)
 
     def export(self, schedule: Dict[str, Dict[pd.Timestamp, dict]], out_dir: str):
         os.makedirs(out_dir, exist_ok=True)
@@ -38,9 +58,15 @@ class Planner:
             for z, zs in schedule.items():
                 s = zs.get(t, {})
                 rec[f"{z}_OnOFF"] = "ON" if s else "OFF"
-                rec[f"{z}_Mode"] = self._mode_text(s.get("mode", 2)) if s else "FAN"
+                rec[f"{z}_Mode"] = (
+                    self._mode_text(s.get("mode", FALLBACK_MODE_CODE))
+                    if s
+                    else FALLBACK_MODE_LABEL
+                )
                 rec[f"{z}_SetTemp"] = s.get("set_temp", 25) if s else 25
-                rec[f"{z}_FanSpeed"] = s.get("fan", 1) if s else 1
+                rec[f"{z}_FanSpeed"] = (
+                    s.get("fan", FALLBACK_FAN_CODE) if s else FALLBACK_FAN_CODE
+                )
                 # 予測電力・予測室温（可視化用）
                 rec[f"{z}_PredPower"] = float(s.get("pred_power", 0.0)) if s else 0.0
                 rec[f"{z}_PredTemp"] = (
@@ -66,9 +92,17 @@ class Planner:
                 s = schedule.get(z, {}).get(t, {})
                 for u in units:
                     rec[f"{u}_OnOFF"] = "ON" if s else "OFF"
-                    rec[f"{u}_Mode"] = self._mode_text(s.get("mode", 2)) if s else "FAN"
+                    rec[f"{u}_Mode"] = (
+                        self._mode_text(s.get("mode", FALLBACK_MODE_CODE))
+                        if s
+                        else FALLBACK_MODE_LABEL
+                    )
                     rec[f"{u}_SetTemp"] = s.get("set_temp", 25) if s else 25
-                    rec[f"{u}_FanSpeed"] = s.get("fan", 1) if s else 1
+                    rec[f"{u}_FanSpeed"] = (
+                        s.get("fan", FALLBACK_FAN_CODE)
+                        if s
+                        else FALLBACK_FAN_CODE
+                    )
             unit_rows.append(rec)
         unit_df = pd.DataFrame(unit_rows)
         unit_path = os.path.join(out_dir, f"unit_schedule_{date_str}.csv")

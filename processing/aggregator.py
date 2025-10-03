@@ -3,6 +3,11 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from processing.utilities.category_mapping_loader import (
+    get_default_category_value,
+    map_category_series,
+)
+
 
 # =============================
 # STEP1: 集約（制御エリア単位テーブル）
@@ -106,6 +111,19 @@ class AreaAggregator:
                         )
                         .reset_index()
                     )
+
+                    # Create A/C Status column based on ON/OFF and Mode
+                    # Status mapping: OFF=0, COOL=1, HEAT=2, FAN=3
+                    if "A/C ON/OFF" in g.columns and "A/C Mode" in g.columns:
+                        g["A/C Status"] = 0  # Default to OFF
+                        # If AC is ON, use the mode value
+                        on_mask = g["A/C ON/OFF"] == 1
+                        g.loc[on_mask, "A/C Status"] = g.loc[on_mask, "A/C Mode"]
+                        # Convert to integer type (not float)
+                        g["A/C Status"] = g["A/C Status"].fillna(0).astype(int)
+                        print(
+                            f"[AreaAggregator] Zone {zone_name}: Created A/C Status column"
+                        )
                 else:
                     g = pd.DataFrame(
                         columns=[
@@ -115,6 +133,7 @@ class AreaAggregator:
                             "A/C ON/OFF",
                             "A/C Mode",
                             "A/C Fan Speed",
+                            "A/C Status",
                         ]
                     )
             else:
@@ -126,6 +145,7 @@ class AreaAggregator:
                         "A/C ON/OFF",
                         "A/C Mode",
                         "A/C Fan Speed",
+                        "A/C Status",
                     ]
                 )
 
@@ -380,45 +400,36 @@ class AreaAggregator:
                     f"[AreaAggregator] {zone_name} - {column} ユニーク値: {unique_values.to_dict()}"
                 )
 
-                # 自動マッピング生成
-                mapping = self._generate_zone_mapping(zone_name, column, unique_values)
-                zone_log["categorical_mappings"][column] = {
+                original_series = dataframe[column]
+                mapped_series, applied_mapping, unmapped_values = map_category_series(
+                    original_series, column
+                )
+                dataframe[column] = mapped_series
+
+                zone_log_entry = {
                     "original_values": unique_values.to_dict(),
-                    "mapping": mapping,
-                    "mapped_count": len(unique_values),
-                    "unmapped_count": 0,
+                    "mapping": applied_mapping,
+                    "mapped_count": len(applied_mapping),
+                    "unmapped_count": int(sum(unmapped_values.values())),
                 }
+                if unmapped_values:
+                    zone_log_entry["unmapped_values"] = unmapped_values
+                zone_log["categorical_mappings"][column] = zone_log_entry
 
-                # マッピング適用
-                dataframe[column] = dataframe[column].map(mapping)
-
-                # マッピングされなかった値の処理
-                unmapped_mask = dataframe[column].isnull()
-                if unmapped_mask.any():
-                    unmapped_values = dataframe.loc[
-                        unmapped_mask, column
-                    ].value_counts()
+                if unmapped_values:
                     print(
-                        f"[AreaAggregator] {zone_name} - {column} マッピングされなかった値: {unmapped_values.to_dict()}"
+                        f"[AreaAggregator] {zone_name} - {column} マッピングされなかった値: {unmapped_values}"
                     )
+                    unmapped_mask = mapped_series.isna() & original_series.notna()
+                    default_value = get_default_category_value(column)
+                    if default_value is not None:
+                        dataframe.loc[unmapped_mask, column] = default_value
+                        zone_log_entry["default_value"] = default_value
+                        print(
+                            f"[AreaAggregator] {zone_name} - {column} デフォルト値({default_value})で置換: {int(unmapped_mask.sum())}件"
+                        )
 
-                    # デフォルト値設定
-                    default_value = self._get_default_value(column)
-                    dataframe[column] = dataframe[column].fillna(default_value)
-
-                    zone_log["categorical_mappings"][column][
-                        "unmapped_values"
-                    ] = unmapped_values.to_dict()
-                    zone_log["categorical_mappings"][column][
-                        "unmapped_count"
-                    ] = unmapped_mask.sum()
-                    zone_log["categorical_mappings"][column][
-                        "default_value"
-                    ] = default_value
-
-                    print(
-                        f"[AreaAggregator] {zone_name} - {column} デフォルト値({default_value})で置換: {unmapped_mask.sum()}件"
-                    )
+                dataframe[column] = dataframe[column].astype(pd.Int64Dtype())
 
         zone_mapping_log["zones"][zone_name] = zone_log
 
@@ -440,95 +451,3 @@ class AreaAggregator:
         print(f"\n[AreaAggregator] エリア別マッピングログ保存: {log_file}")
 
         return dataframe
-
-    def _generate_zone_mapping(
-        self, zone: str, column: str, unique_values: pd.Series
-    ) -> dict:
-        """エリア固有のマッピングを自動生成"""
-        mapping = {}
-
-        for value in unique_values.index:
-            if pd.isna(value):
-                continue
-
-            # 値の正規化
-            normalized_value = str(value).strip().upper()
-
-            if column == "A/C ON/OFF":
-                if any(
-                    keyword in normalized_value
-                    for keyword in ["ON", "1", "TRUE", "有効"]
-                ):
-                    mapping[value] = 1
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["OFF", "0", "FALSE", "無効"]
-                ):
-                    mapping[value] = 0
-                else:
-                    # デフォルトはOFF
-                    mapping[value] = 0
-
-            elif column == "A/C Mode":
-                if any(
-                    keyword in normalized_value
-                    for keyword in ["COOL", "冷房", "COOLING"]
-                ):
-                    mapping[value] = 0
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["DEHUM", "除湿", "DEHUMIDIFY"]
-                ):
-                    mapping[value] = 1
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["FAN", "送風", "FAN_ONLY"]
-                ):
-                    mapping[value] = 2
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["HEAT", "暖房", "HEATING"]
-                ):
-                    mapping[value] = 3
-                else:
-                    # デフォルトはFAN
-                    mapping[value] = 2
-
-            elif column == "A/C Fan Speed":
-                if any(
-                    keyword in normalized_value
-                    for keyword in ["AUTO", "自動", "AUTOMATIC"]
-                ):
-                    mapping[value] = 0
-                elif any(keyword in normalized_value for keyword in ["LOW", "低", "1"]):
-                    mapping[value] = 1
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["MEDIUM", "中", "2", "MID"]
-                ):
-                    mapping[value] = 2
-                elif any(
-                    keyword in normalized_value for keyword in ["HIGH", "高", "3"]
-                ):
-                    mapping[value] = 3
-                elif any(
-                    keyword in normalized_value
-                    for keyword in ["TOP", "最高", "4", "MAX"]
-                ):
-                    mapping[value] = 4
-                else:
-                    # デフォルトはLow
-                    mapping[value] = 1
-
-        return mapping
-
-    def _get_default_value(self, column: str) -> int:
-        """カラム別のデフォルト値を取得"""
-        if column == "A/C ON/OFF":
-            return 0  # OFF
-        elif column == "A/C Mode":
-            return 2  # FAN
-        elif column == "A/C Fan Speed":
-            return 1  # Low
-        else:
-            return 0

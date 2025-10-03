@@ -13,7 +13,24 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+from optimization.feature_builder import OptimizationFeatureBuilder
+from processing.utilities.category_mapping_loader import (
+    get_category_mapping,
+    normalize_candidate_values,
+)
 from training.model_builder import EnvPowerModels
+
+MODE_MAPPING = get_category_mapping("A/C Mode")
+FALLBACK_MODE_CODE = (
+    MODE_MAPPING["FAN"] if "FAN" in MODE_MAPPING else next(iter(MODE_MAPPING.values()))
+)
+
+FAN_SPEED_MAPPING = get_category_mapping("A/C Fan Speed")
+FALLBACK_FAN_CODE = (
+    FAN_SPEED_MAPPING["Low"]
+    if "Low" in FAN_SPEED_MAPPING
+    else next(iter(FAN_SPEED_MAPPING.values()))
+)
 
 
 def optimize_single_zone(
@@ -42,6 +59,9 @@ def optimize_single_zone(
     """
     print(f"[Parallel] Starting optimization for zone: {zone_name}")
 
+    # Initialize feature builder
+    feature_builder = OptimizationFeatureBuilder()
+
     # ゾーン設定の取得
     start_h = int(str(zone_data.get("start_time", "07:00")).split(":")[0])
     end_h = int(str(zone_data.get("end_time", "20:00")).split(":")[0])
@@ -58,16 +78,23 @@ def optimize_single_zone(
     sp_min = int(zone_data.get("setpoint_min", 22))
     sp_max = int(zone_data.get("setpoint_max", 28))
     sp_list = list(range(sp_min, sp_max + 1))
-    mode_list = zone_data.get("mode_candidates", [0, 1, 2])
+    mode_candidates = zone_data.get("mode_candidates")
+    if mode_candidates is not None and not isinstance(
+        mode_candidates, (list, tuple, set)
+    ):
+        mode_candidates = [mode_candidates]
+    mode_list = normalize_candidate_values(
+        "A/C Mode", mode_candidates, ("COOL", "HEAT", "FAN")
+    )
 
-    fan_candidates = zone_data.get("fan_candidates", [1, 2, 3])
-    fan_mapping = {"Auto": 0, "Low": 1, "Medium": 2, "High": 3, "Top": 4}
-    fan_list = []
-    for fan in fan_candidates:
-        if isinstance(fan, str):
-            fan_list.append(fan_mapping.get(fan, 1))
-        else:
-            fan_list.append(int(fan))
+    fan_candidates = zone_data.get("fan_candidates")
+    if fan_candidates is not None and not isinstance(
+        fan_candidates, (list, tuple, set)
+    ):
+        fan_candidates = [fan_candidates]
+    fan_list = normalize_candidate_values(
+        "A/C Fan Speed", fan_candidates, ("Low", "Medium", "High")
+    )
 
     print(
         f"[Parallel] Zone {zone_name}: {len(sp_list)}×{len(mode_list)}×{len(fan_list)} = {len(sp_list) * len(mode_list) * len(fan_list)} combinations"
@@ -107,19 +134,28 @@ def optimize_single_zone(
             for md in mode_list:
                 for fs in fan_list:
                     # 特徴量の作成
-                    feats = pd.DataFrame(
-                        [
-                            {
-                                "A/C Set Temperature": sp,
-                                "Indoor Temp. Lag1": last_temp,
-                                "A/C ON/OFF": 1 if is_biz else 0,
-                                "A/C Mode": md,
-                                "A/C Fan Speed": fs,
-                                "Outdoor Temp.": ot,
-                                "Outdoor Humidity": oh,
-                            }
-                        ]
-                    )[models.feature_cols]
+                    base_features = {
+                        "A/C Set Temperature": sp,
+                        "Indoor Temp. Lag1": last_temp,
+                        "A/C ON/OFF": 1 if is_biz else 0,
+                        "A/C Mode": md,
+                        "A/C Fan Speed": fs,
+                        "Outdoor Temp.": ot,
+                        "Outdoor Humidity": oh,
+                        "Solar Radiation": 0.0,  # Default value
+                    }
+
+                    # Build complete feature set using feature builder
+                    features_df = feature_builder.build_features(
+                        base_features=base_features,
+                        timestamp=t,
+                        zone_name=zone_name,
+                        weather_history=None,  # Could be enhanced with actual history
+                        power_history=None,  # Could be enhanced with actual history
+                    )
+
+                    # Select only the features the model expects
+                    feats = features_df[models.feature_cols]
 
                     # 予測
                     temp_pred = float(models.temp_model.predict(feats)[0])
@@ -147,8 +183,8 @@ def optimize_single_zone(
             if best is not None
             else {
                 "set_temp": 25,
-                "mode": 2,
-                "fan": 1,
+                "mode": FALLBACK_MODE_CODE,
+                "fan": FALLBACK_FAN_CODE,
                 "pred_temp": last_temp,
                 "pred_power": 0.0,
                 "score": 9e9,
